@@ -118,6 +118,7 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
   <div><!-- LEFT column -->
     <div class="panel">
       <h2>1 · Run setup</h2>
+      <div id="livesync" style="margin-bottom:10px"></div>
       <div id="chars"></div>
       <label class="f">Where are you?</label>
       <div id="acts"></div>
@@ -154,7 +155,12 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
       <h2>Boss intel</h2>
       <div id="bossintel"></div>
     </div>
+    <div class="panel" id="mappanel" style="display:none">
+      <h2>Live map — best route</h2>
+      <div id="mapbox"></div>
+    </div>
     <div class="panel" id="oddspanel"><div id="odds"></div></div>
+    <div class="panel"><div id="lessons"></div></div>
   </div>
 
   <div><!-- CENTER column -->
@@ -310,7 +316,8 @@ const ENGINE = (() => {
     const done = historyThisAct(ctx);
 
     // elites: act target minus the ones you've already fought this act
-    const thr = ELITE_HP_THRESHOLD[ctx.act] || 0.5;
+    let thr = ELITE_HP_THRESHOLD[ctx.act] || 0.5;
+    if (ctx.lessons && ctx.lessons.eliteCaution) { thr += 0.07; reasons.push('elite bar raised 7% — your past runs died to elites'); }
     let eliteTarget = 0;
     if (hpFrac >= thr && frontload >= 2) eliteTarget = 2;
     else if (hpFrac >= thr) eliteTarget = 1;
@@ -555,6 +562,13 @@ const ENGINE = (() => {
       k: 'need', pts: need,
       why: needWhy.length ? `Fills deck gap: ${needWhy.join(', ')}` : 'Deck already covers this card’s roles'
     });
+
+    // 3b) Lessons from your past runs — ±3
+    if (ctx.lessons && ctx.lessons.archAdj && ctx.lessons.archAdj[ctx.char]) {
+      let d = 0, dt = null;
+      for (const t of c.tags) { const v = ctx.lessons.archAdj[ctx.char][t]; if (v != null && Math.abs(v) > Math.abs(d)) { d = v; dt = t; } }
+      if (d) parts.push({ k: 'lessons', pts: d, why: `Your ${dt} runs on ${ctx.char} have gone ${d > 0 ? 'well' : 'poorly'} — personal record adjustment` });
+    }
 
     // 4b) Owned-relic synergy — 0..8
     let rel = 0; const relWhy = [];
@@ -1045,7 +1059,146 @@ const ENGINE = (() => {
     return ENGINE.DATA.cards.filter(c => c.char === 'Curse' && t.includes(c.name.toLowerCase())).map(c => c.id);
   }
 
-  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, historyThisAct, goldReward, restHeal, afterCombatHeal, parseEventDeltas, parseOutcomeDeltas, isPersistentEffect, cursesInText, ancientHeal, startHp, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL, WEARY_LEVEL };
+  /* ================= v8: LIVE SAVE SYNC + MAP ROUTES + LESSONS ================= */
+
+  // ---- ModelId ("CARD.STRIKE_IRONCLAD") → our ids ("StrikeIronclad")
+  let slugIdx = null;
+  const slugKeyOf = s => String(s).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  function buildSlugIndex() {
+    slugIdx = { card: {}, relic: {}, ench: {} };
+    for (const c of ENGINE.DATA.cards) slugIdx.card[slugKeyOf(c.id)] = c.id;
+    for (const r of ENGINE.DATA.relics) slugIdx.relic[slugKeyOf(r.id)] = r.id;
+    for (const e of ENGINE.DATA.enchantments) slugIdx.ench[slugKeyOf(e.id)] = e.id;
+  }
+  function fromModelId(kind, mid) {
+    if (!mid) return null;
+    if (!slugIdx) buildSlugIndex();
+    return (slugIdx[kind] || {})[slugKeyOf(String(mid).split('.').pop())] || null;
+  }
+  const CHAR_IDS = { IRONCLAD: 'Ironclad', SILENT: 'Silent', DEFECT: 'Defect', REGENT: 'Regent', NECROBINDER: 'Necrobinder' };
+  const ACT_IDS = { OVERGROWTH: 'Overgrowth', UNDERDOCKS: 'Underdocks', HIVE: 'Hive', GLORY: 'Glory' };
+
+  // parse a current_run.save JSON into tool state
+  function parseSaveRun(save) {
+    const p = (save.players || [])[0]; if (!p) return null;
+    const char = CHAR_IDS[String(p.character_id || '').split('.').pop()];
+    if (!char) return null;
+    const actIdx = save.current_act_index | 0;
+    const actEntry = (save.acts || [])[actIdx] || {};
+    const region = ACT_IDS[String(actEntry.id || '').split('.').pop()] || 'Overgrowth';
+    let bossId = '?';
+    const bid = actEntry.rooms && actEntry.rooms.boss_id;
+    if (bid) {
+      const bk = slugKeyOf(String(bid).split('.').pop());
+      const reg = actRegion(region);
+      const hit = reg && reg.bosses.find(b => slugKeyOf(b.id) === bk);
+      if (hit) bossId = hit.id;
+    }
+    const deck = (p.deck || []).map(e => {
+      const id = fromModelId('card', e.id); if (!id) return null;
+      const out = { id, up: (e.current_upgrade_level | 0) > 0 };
+      const en = e.enchantment && fromModelId('ench', e.enchantment.id);
+      if (en) out.ench = en;
+      return out;
+    }).filter(Boolean);
+    const relics = (p.relics || []).map(e => fromModelId('relic', typeof e === 'string' ? e : (e && e.id))).filter(Boolean);
+    const visited = save.visited_map_coords || [];
+    return {
+      char, ascension: save.ascension | 0, act: actIdx + 1, region, bossId,
+      deck, relics, gold: p.gold | 0, hp: p.current_hp | 0, maxHp: p.max_hp | 0,
+      room: Math.max(1, visited.length), map: actEntry.saved_map || null, visited,
+    };
+  }
+
+  // ---- live map route planner (DP over the real map DAG from the save)
+  function roomNodeValue(type, ctx, lessons) {
+    const hpFrac = ctx.maxHp ? (ctx.hp ?? ctx.maxHp) / ctx.maxHp : 1;
+    const deckC = ctx.deck.map(d => card(d.id)).filter(Boolean);
+    const frontload = deckC.filter(c => c.tags.includes('frontload-damage')).length;
+    const curses = deckC.filter(c => c.char === 'Curse').length;
+    let thr = ELITE_HP_THRESHOLD[ctx.act] || 0.5;
+    if (lessons && lessons.eliteCaution) thr += 0.07;
+    switch (type) {
+      case 'monster': return 3;
+      case 'elite': case 'burning_elite': return hpFrac >= thr ? (frontload >= 2 ? 8 : 6) : -5;
+      case 'rest_site': return hpFrac < 0.55 ? 7 : hpFrac < 0.75 ? 4 : 2.5;
+      case 'merchant': case 'shop': return ((ctx.gold || 0) >= 150 || curses > 0) ? 6 : 1.5;
+      case 'treasure': return 5;
+      case 'unknown': case 'event': return 4;
+      case 'ancient': return 2;
+      case 'boss': return 0;
+      default: return 2;
+    }
+  }
+  function planRoute(map, visited, ctx, lessons) {
+    if (!map || !map.points) return null;
+    const key = c => c.col + ',' + c.row;
+    const nodes = new Map();
+    for (const pt of map.points) nodes.set(key(pt.coord), pt);
+    if (map.boss) nodes.set(key(map.boss.coord), map.boss);
+    const cur = visited && visited.length ? visited[visited.length - 1] : null;
+    const memo = new Map();
+    const best = coord => {
+      const k = key(coord); if (memo.has(k)) return memo.get(k);
+      const node = nodes.get(k);
+      if (!node) return { value: 0, path: [] };
+      let bc = null;
+      for (const ch of (node.children || [])) { const r = best(ch); if (!bc || r.value > bc.value) bc = r; }
+      const res = { value: roomNodeValue(node.type, ctx, lessons) + (bc ? bc.value : 0), path: [{ coord: node.coord, type: node.type }, ...(bc ? bc.path : [])] };
+      memo.set(k, res); return res;
+    };
+    let result = { value: 0, path: [] };
+    if (cur && nodes.has(key(cur))) {
+      let bc = null;
+      for (const ch of (nodes.get(key(cur)).children || [])) { const r = best(ch); if (!bc || r.value > bc.value) bc = r; }
+      if (bc) result = bc;
+    } else {
+      for (const pt of map.points.filter(pp => pp.coord.row === 0)) { const r = best(pt.coord); if (r.value > result.value || !result.path.length) result = r; }
+    }
+    return { ...result, nodes: [...nodes.values()], current: cur, width: map.width || 7, height: map.height || (map.boss ? map.boss.coord.row + 1 : 15) };
+  }
+
+  // ---- lessons: learn from finished runs
+  function runRecordFromHistory(h) {
+    const p = (h.players || [])[0] || {};
+    const char = CHAR_IDS[String(p.character_id || '').split('.').pop()] || '?';
+    const deck = (p.deck || []).map(e => fromModelId('card', e.id)).filter(Boolean).map(id => ({ id, up: false }));
+    const kb = String(h.killed_by_encounter || '');
+    return {
+      char, asc: h.ascension | 0, win: !!h.win, abandoned: !!h.was_abandoned,
+      killedBy: kb ? kb.split('.').pop() : (h.killed_by_event ? String(h.killed_by_event).split('.').pop() : null),
+      killedByElite: /ELITE/.test(kb),
+      archetypes: topArchetypes(deck, 3).map(a => a[0]),
+      rooms: (h.map_point_history || []).length,
+    };
+  }
+  function lessonsFromRuns(runs) {
+    const real = runs.filter(r => !r.abandoned);
+    const byCharArch = {}; let eliteDeaths = 0;
+    for (const r of real) {
+      if (!r.win && r.killedByElite) eliteDeaths++;
+      for (const a of (r.archetypes || [])) {
+        const k = r.char + '|' + a;
+        byCharArch[k] = byCharArch[k] || { w: 0, l: 0 };
+        r.win ? byCharArch[k].w++ : byCharArch[k].l++;
+      }
+    }
+    const archAdj = {}; const notes = [];
+    for (const [k, v] of Object.entries(byCharArch)) {
+      const n = v.w + v.l; if (n < 3) continue;
+      const wr = (v.w + 1) / (n + 2); // Laplace-smoothed personal winrate
+      const delta = Math.max(-3, Math.min(3, Math.round((wr - 0.5) * 12 * 10) / 10));
+      if (Math.abs(delta) >= 1) {
+        const [ch, a] = k.split('|');
+        (archAdj[ch] = archAdj[ch] || {})[a] = delta;
+        notes.push(`${ch} ${a}: ${v.w}W/${v.l}L → ${delta > 0 ? '+' : ''}${delta} on ${a} picks`);
+      }
+    }
+    if (eliteDeaths >= 2) notes.push(`${eliteDeaths} deaths to elites → elite HP bar raised 7%`);
+    return { archAdj, eliteCaution: eliteDeaths >= 2, runCount: real.length, notes };
+  }
+
+  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, historyThisAct, goldReward, restHeal, afterCombatHeal, parseEventDeltas, parseOutcomeDeltas, isPersistentEffect, cursesInText, ancientHeal, startHp, parseSaveRun, planRoute, runRecordFromHistory, lessonsFromRuns, betterLaterProb, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL, WEARY_LEVEL };
 })();
 
 if (typeof module !== 'undefined') module.exports = ENGINE;
@@ -1129,6 +1282,7 @@ function ctx() {
     region: STATE.region, bossId: STATE.bossId, source: STATE.source,
     ascension: STATE.ascension, gold: STATE.gold, hp: STATE.hp, maxHp: STATE.maxHp,
     removalsUsed: STATE.removalsUsed, relics: STATE.relics, history: STATE.history,
+    lessons: STATE.lessonsData,
   };
 }
 
@@ -1245,6 +1399,195 @@ function undoLast() {
 }
 let flashMsg = '';
 function flash(m) { flashMsg = m; }
+
+/* ================= LIVE SYNC (desktop Chrome/Edge): watch the game's save file ================= */
+const LIVE = { dir: null, saveHandle: null, savesDir: null, lastMod: 0, timer: null, active: false, hadSave: false, sessionStart: Date.now() };
+const idb = {
+  open: () => new Promise((res, rej) => { const r = indexedDB.open('sda', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }),
+  set: async (k, v) => { const db = await idb.open(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+  get: async (k) => { const db = await idb.open(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readonly'); const g = t.objectStore('kv').get(k); g.onsuccess = () => res(g.result); g.onerror = () => rej(g.error); }); },
+};
+async function findSaveFile(dir, depth = 0) {
+  if (depth > 6) return null;
+  let best = null;
+  try {
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === 'file' && name === 'current_run.save') {
+        return { file: handle, savesDir: dir };
+      } else if (handle.kind === 'directory' && !name.startsWith('.')) {
+        const r = await findSaveFile(handle, depth + 1);
+        if (r) best = best || r;
+      }
+    }
+  } catch (e) { }
+  return best;
+}
+async function findSavesDir(dir, depth = 0) { // fallback: locate a "saves" folder even with no active run
+  if (depth > 6) return null;
+  try {
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === 'directory') {
+        if (name === 'saves') return handle;
+        const r = await findSavesDir(handle, depth + 1);
+        if (r) return r;
+      }
+    }
+  } catch (e) { }
+  return null;
+}
+async function connectLive() {
+  try {
+    const dir = await window.showDirectoryPicker({ id: 'sts2saves', mode: 'read' });
+    LIVE.dir = dir;
+    try { await idb.set('gamedir', dir); } catch (e) { }
+    await startLivePolling();
+  } catch (e) { /* user cancelled */ }
+}
+async function startLivePolling() {
+  const found = await findSaveFile(LIVE.dir);
+  LIVE.saveHandle = found ? found.file : null;
+  LIVE.savesDir = found ? found.savesDir : await findSavesDir(LIVE.dir);
+  LIVE.active = true; LIVE.lastMod = 0; LIVE.hadSave = !!LIVE.saveHandle;
+  if (LIVE.timer) clearInterval(LIVE.timer);
+  LIVE.timer = setInterval(pollLive, 2500);
+  renderLive();
+  pollLive();
+}
+async function pollLive() {
+  if (!LIVE.active) return;
+  try {
+    if (!LIVE.saveHandle) { // waiting for a run to start
+      const found = await findSaveFile(LIVE.dir);
+      if (found) { LIVE.saveHandle = found.file; LIVE.savesDir = found.savesDir; LIVE.lastMod = 0; }
+      else { renderLive(); return; }
+    }
+    let file;
+    try { file = await LIVE.saveHandle.getFile(); }
+    catch (e) { // file gone → run ended
+      if (LIVE.hadSave) await onRunEnded();
+      LIVE.saveHandle = null; LIVE.hadSave = false; renderLive(); return;
+    }
+    LIVE.hadSave = true;
+    if (file.lastModified === LIVE.lastMod) return;
+    LIVE.lastMod = file.lastModified;
+    const save = JSON.parse(await file.text());
+    const parsed = ENGINE.parseSaveRun(save);
+    if (parsed) applyLiveSave(parsed);
+  } catch (e) { /* transient .tmp swap — retry next tick */ }
+}
+function applyLiveSave(p) {
+  const charChanged = p.char !== STATE.char;
+  Object.assign(STATE, {
+    char: p.char, ascension: p.ascension, act: p.act, region: p.region, bossId: p.bossId,
+    deck: p.deck, relics: p.relics, gold: p.gold, hp: p.hp, maxHp: p.maxHp, room: Math.min(p.room, ENGINE.actRooms(p.region)),
+  });
+  if (charChanged) { STATE.history = []; STATE.relicLog = p.relics.map(id => ({ id, act: p.act, room: 0, source: 'live sync' })); }
+  STATE.liveMap = p.map; STATE.liveVisited = p.visited;
+  flash(`⚡ Live sync: ${p.char} · act ${p.act} room ${p.room} · ${p.hp}/${p.maxHp} HP · ${p.gold}g · ${p.deck.length} cards, ${p.relics.length} relics.`);
+  renderAll();
+}
+async function onRunEnded() {
+  let rec = null;
+  try {
+    if (LIVE.savesDir) {
+      let newest = null;
+      const hist = await LIVE.savesDir.getDirectoryHandle('history').catch(() => null);
+      if (hist) for await (const [name, h] of hist.entries()) {
+        if (h.kind === 'file' && name.endsWith('.run')) {
+          const f = await h.getFile();
+          if (!newest || f.lastModified > newest.lastModified) newest = f;
+        }
+      }
+      if (newest && newest.lastModified > LIVE.sessionStart - 24 * 3600e3) {
+        rec = ENGINE.runRecordFromHistory(JSON.parse(await newest.text()));
+      }
+    }
+  } catch (e) { }
+  if (!rec) rec = { char: STATE.char, asc: STATE.ascension, win: null, abandoned: false, killedBy: null, killedByElite: false, archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length };
+  if (rec.win == null) {
+    // couldn't read the result file — ask
+    rec.win = confirm('Run over! Did you WIN? (OK = victory, Cancel = defeat)');
+  }
+  pushRun(rec);
+  STATE.liveMap = null; STATE.liveVisited = null;
+  flash(`Run recorded: ${rec.win ? 'VICTORY' : 'defeat'}${rec.killedBy ? ' (killed by ' + rec.killedBy.toLowerCase().replace(/_/g, ' ') + ')' : ''} — lessons updated.`);
+  renderAll();
+}
+
+/* ---------- lessons persistence ---------- */
+function loadRuns() { try { return JSON.parse((store && store.getItem('sda_runs')) || '[]'); } catch (e) { return []; } }
+function pushRun(rec) {
+  const runs = loadRuns(); runs.push(rec);
+  try { if (store) store.setItem('sda_runs', JSON.stringify(runs.slice(-100))); } catch (e) { }
+  STATE.lessonsData = ENGINE.lessonsFromRuns(runs);
+}
+function renderLessons() {
+  const box = document.querySelector('#lessons'); if (!box) return;
+  const runs = loadRuns();
+  if (!STATE.lessonsData) STATE.lessonsData = ENGINE.lessonsFromRuns(runs);
+  const L = STATE.lessonsData;
+  const byChar = {};
+  for (const r of runs.filter(x => !x.abandoned)) { byChar[r.char] = byChar[r.char] || { w: 0, l: 0 }; r.win ? byChar[r.char].w++ : byChar[r.char].l++; }
+  let h = `<div class="grouphead">Lessons (${L.runCount} run${L.runCount === 1 ? '' : 's'} recorded)</div>`;
+  h += `<div class="small muted">${Object.entries(byChar).map(([c, v]) => `${c} ${v.w}W/${v.l}L`).join(' · ') || 'No finished runs yet — live sync records them automatically, or use the buttons.'}</div>`;
+  if (L.notes && L.notes.length) h += L.notes.map(n => `<div class="whyrow small">· ${esc(n)}</div>`).join('');
+  h += `<div class="rowflex" style="margin-top:6px"><button class="ghost small" id="recwin">Record win</button><button class="ghost small" id="recloss">Record loss</button></div>`;
+  box.innerHTML = h;
+  const mk = win => () => {
+    pushRun({ char: STATE.char, asc: STATE.ascension, win, abandoned: false, killedBy: null, killedByElite: !win && confirm('Did an ELITE kill you? (OK = yes)'), archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length });
+    flash(`Run recorded as ${win ? 'win' : 'loss'} — future recommendations adjust.`);
+    renderAll();
+  };
+  box.querySelector('#recwin').onclick = mk(true);
+  box.querySelector('#recloss').onclick = mk(false);
+}
+
+/* ---------- live map route rendering ---------- */
+const MAP_COLORS = { monster: '#8fa3c0', elite: '#e0604e', burning_elite: '#e0604e', rest_site: '#e8a15f', merchant: '#eec25f', shop: '#eec25f', treasure: '#7fe0c3', unknown: '#c98fe8', event: '#c98fe8', ancient: '#7fe0c3', boss: '#e0604e' };
+function renderLiveMap() {
+  const panel = document.querySelector('#mappanel');
+  if (!STATE.liveMap) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  const route = ENGINE.planRoute(STATE.liveMap, STATE.liveVisited, ctx(), STATE.lessonsData);
+  if (!route) { panel.style.display = 'none'; return; }
+  const W = 330, H = Math.max(240, route.height * 26);
+  const px = c => 20 + (c.col / Math.max(1, route.width - 1)) * (W - 40);
+  const py = c => H - 16 - (c.row / Math.max(1, route.height - 1)) * (H - 32);
+  const onPath = new Set(route.path.map(s => s.coord.col + ',' + s.coord.row));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;background:var(--panel2);border-radius:8px">`;
+  for (const n of route.nodes) for (const chd of (n.children || [])) {
+    const hl = onPath.has(n.coord.col + ',' + n.coord.row) && onPath.has(chd.col + ',' + chd.row);
+    const curEdge = route.current && n.coord.col === route.current.col && n.coord.row === route.current.row && onPath.has(chd.col + ',' + chd.row);
+    svg += `<line x1="${px(n.coord)}" y1="${py(n.coord)}" x2="${px(chd)}" y2="${py(chd)}" stroke="${hl || curEdge ? 'var(--accent)' : 'rgba(255,255,255,.13)'}" stroke-width="${hl || curEdge ? 2.5 : 1}"/>`;
+  }
+  for (const n of route.nodes) {
+    const k = n.coord.col + ',' + n.coord.row;
+    const isCur = route.current && n.coord.col === route.current.col && n.coord.row === route.current.row;
+    const r = n.type === 'boss' ? 8 : onPath.has(k) ? 6 : 4;
+    svg += `<circle cx="${px(n.coord)}" cy="${py(n.coord)}" r="${r}" fill="${MAP_COLORS[n.type] || '#888'}" ${onPath.has(k) || isCur ? 'stroke="var(--accent)" stroke-width="2"' : 'opacity="0.55"'}/>`;
+    if (isCur) svg += `<circle cx="${px(n.coord)}" cy="${py(n.coord)}" r="10" fill="none" stroke="#fff" stroke-width="1.6"/>`;
+  }
+  svg += '</svg>';
+  const steps = route.path.slice(0, 8).map(s => s.type.replace(/_/g, ' ')).join(' → ');
+  document.querySelector('#mapbox').innerHTML = svg
+    + `<div class="small" style="margin-top:6px"><b>Best route:</b> ${esc(steps)}${route.path.length > 8 ? ' → …' : ''} <span class="muted">(value ${Math.round(route.value)})</span></div>`
+    + `<div class="small muted">Recomputed live from your position, HP, gold, deck, and lessons. ○ = you.</div>`;
+}
+function renderLive() {
+  const box = document.querySelector('#livesync'); if (!box) return;
+  if (!('showDirectoryPicker' in window)) {
+    box.innerHTML = '<span class="small muted">Live game sync needs Chrome or Edge on desktop (open the GitHub Pages link).</span>';
+    return;
+  }
+  if (LIVE.active) {
+    box.innerHTML = `<span class="small" style="color:${LIVE.saveHandle ? 'var(--good)' : 'var(--warn)'}">● ${LIVE.saveHandle ? 'LIVE — tracking your run from the game save' : 'Connected — waiting for a run to start…'}</span> <button class="ghost small" id="livestop">stop</button>`;
+    box.querySelector('#livestop').onclick = () => { LIVE.active = false; clearInterval(LIVE.timer); STATE.liveMap = null; renderAll(); };
+  } else {
+    box.innerHTML = `<button id="livego" class="seg" style="width:100%">⚡ Live-sync with the game (pick your StS2 save folder)</button>
+      <div class="small muted" style="margin-top:3px">Press Win+R, paste <code>%APPDATA%</code>, find the Slay the Spire 2 folder, pick it. The tool then reads the save after every room — deck, relics, HP, gold, map — automatically.</div>`;
+    box.querySelector('#livego').onclick = connectLive;
+  }
+}
 
 /* ---------- run setup ---------- */
 function regionsForAct(act) { return DATA.acts.filter(a => a.act === act); }
@@ -1607,8 +1950,8 @@ function renderAncientTab() {
       }
       clampHp();
       detail.deltas = d; detail.cursesAdded = cursesAdded;
-      // persistent blessings are relics you keep — track them with source 'ancient'
-      if (ENGINE.isPersistentEffect(o.effect)) { addRelicOwned(o.id, `ancient (${STATE.ancient})`); detail.relicAdded = o.id; }
+      // every blessing is a relic in-game — always track it in relics owned
+      if (!STATE.relics.includes(o.id)) { addRelicOwned(o.id, `ancient (${STATE.ancient})`); detail.relicAdded = o.id; }
       // attach to the tracker's ancient entry for this room, or log fresh
       const last = STATE.history[STATE.history.length - 1];
       if (last && last.type === 'ancient' && !last.detail?.took) last.detail = { ...(last.detail || {}), ...detail };
@@ -1997,6 +2340,7 @@ function initDeckAdd() {
 
 function renderAll() {
   renderSetup(); renderBoss(); renderTabs(); renderDeck(); renderRelics(); renderOdds();
+  renderLive(); renderLiveMap(); renderLessons();
   $('#verchip').textContent = `game ${DATA.meta.gameVersion} · tiers ${DATA.meta.tiersDate}`;
   autoSave();
 }
@@ -2004,7 +2348,16 @@ function renderAll() {
 document.addEventListener('DOMContentLoaded', () => {
   STATE.deck = starterDeck(STATE.char);
   STATE.relics = starterRelics(STATE.char);
+  STATE.lessonsData = ENGINE.lessonsFromRuns(loadRuns());
   if (autoRestore()) setTimeout(() => { $('#savemsg').textContent = 'Restored your last run (auto-saved on this device). Reset run to start fresh.'; }, 0);
+  // reconnect live sync silently if permission persists
+  (async () => {
+    try {
+      if (!('showDirectoryPicker' in window)) return;
+      const dir = await idb.get('gamedir');
+      if (dir && (await dir.queryPermission({ mode: 'read' })) === 'granted') { LIVE.dir = dir; await startLivePolling(); }
+    } catch (e) { }
+  })();
   initDeckAdd();
   $('#recommend').onclick = runRecommend;
   $('#savebtn').onclick = saveCode;
