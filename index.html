@@ -1133,7 +1133,18 @@ function undoLast() {
     else if (h.detail) { STATE.hp += h.detail.hpLost || 0; STATE.hp -= ENGINE.afterCombatHeal(ctx()).heal; }
   } else if (h.type === 'treasure') STATE.gold -= ENGINE.goldReward('treasure', ctx());
   else if (h.type === 'rest' && h.detail?.mode === 'sleep') STATE.hp -= ENGINE.restHeal(ctx());
-  else if (h.type === 'event' && h.detail?.deltas) { STATE.hp -= h.detail.deltas.hp; STATE.gold -= h.detail.deltas.gold; }
+  else if (h.type === 'event' && h.detail) {
+    if (h.detail.before) { // exact restore
+      STATE.hp = h.detail.before.hp; STATE.maxHp = h.detail.before.maxHp; STATE.gold = h.detail.before.gold;
+    } else {
+      const allTakes = h.detail.takes || (h.detail.deltas ? [{ deltas: h.detail.deltas }] : []);
+      for (const t of allTakes) {
+        const dd = t.deltas || {};
+        STATE.hp -= dd.hp || 0; STATE.gold -= dd.gold || 0;
+        if (dd.maxHp) { STATE.maxHp -= dd.maxHp; if (dd.maxHp > 0) STATE.hp -= dd.maxHp; }
+      }
+    }
+  }
   else if (h.type === 'ancient') {
     if (h.detail?.healed) STATE.hp -= h.detail.healed;
     for (const dd of [h.detail?.deltas, h.detail?.drawbackDeltas]) {
@@ -1533,37 +1544,48 @@ function renderEventTab() {
   if (!STATE.eventId) { box.innerHTML = `<div class="muted small">${evs.length} events possible in ${esc(ENGINE.actRegion(STATE.region).name)} (incl. shared). Pick one to see the choices.</div>`; return; }
   const info = ENGINE.eventInfo(STATE.eventId, ctx());
   if (!info) { box.innerHTML = ''; return; }
+  // the running event entry (for repeat-take counting)
+  const entry = [...STATE.history].reverse().find(x => x.type === 'event' && x.act === STATE.act && x.detail?.event === info.id);
+  const takes = entry?.detail?.takes || [];
+  const takenCount = choice => takes.filter(t => t.choice === choice).length;
   let h = '';
   if (info.approx) h += `<div class="small" style="color:var(--warn)">Community data thin for this event — options below are decoded from game code and may read rough.</div>`;
   info.options.forEach((o, i) => {
+    const n = takenCount(o.choice);
     h += `<div class="opt ${o.isBest ? 'best' : ''}"><div class="opthead"><b>${esc(o.choice || '(option)')}</b>
       ${o.isBest ? '<span class="pill" style="color:var(--good)">community pick</span>' : ''}
+      ${n ? `<span class="pill" style="color:var(--accent)">taken ×${n}</span>` : ''}
       ${o.flags.map(f => `<span class="pill" style="color:${f.kind === 'danger' ? 'var(--bad)' : 'var(--warn)'}">${esc(f.text)}</span>`).join('')}
-      <button class="take" data-opt="${i}">I chose this</button></div>
+      <button class="take" data-opt="${i}">${n ? 'Took it again' : 'I chose this'}</button></div>
       <div class="small muted">${esc(o.outcome)}</div></div>`;
   });
   if (info.best) h += `<div class="verdict vtake small">☞ ${esc(info.best)}</div>`;
   if (info.cond) h += `<div class="small muted" style="margin-top:4px">Conditions: ${esc(info.cond)}</div>`;
-  h += `<div id="evapplied" class="small" style="color:var(--good);margin-top:6px"></div>`;
+  if (takes.length) h += `<div class="rowflex" style="margin-top:8px"><button id="evleave" class="ghost">Leave event (done)</button><span class="small muted">repeatable options: each tap re-applies the outcome</span></div>`;
   box.innerHTML = h;
   box.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => {
     const o = info.options[+b.dataset.opt];
+    const before = { hp: STATE.hp, maxHp: STATE.maxHp, gold: STATE.gold }; // exact-undo snapshot
     const d = ENGINE.parseOutcomeDeltas(o.outcome);
     STATE.hp += d.hp; if (d.goldAll) STATE.gold = 0; STATE.gold = Math.max(0, STATE.gold + d.gold);
     if (d.maxHp) { STATE.maxHp += d.maxHp; if (d.maxHp > 0) STATE.hp += d.maxHp; }
     clampHp();
-    // attach to the tracker's event entry for this room, or log fresh if none
+    const take = { choice: o.choice, deltas: d };
+    // reuse this room's entry for repeats; attach to tracker's bare entry; else log fresh
+    let e2 = [...STATE.history].reverse().find(x => x.type === 'event' && x.act === STATE.act && x.detail?.event === info.id);
     const last = STATE.history[STATE.history.length - 1];
-    if (last && last.type === 'event' && !last.detail) last.detail = { event: info.id, choice: o.choice, deltas: d };
-    else logRoom('event', { event: info.id, choice: o.choice, deltas: d });
+    if (e2) e2.detail.takes.push(take);
+    else if (last && last.type === 'event' && !last.detail) last.detail = { event: info.id, takes: [take], before };
+    else logRoom('event', { event: info.id, takes: [take], before });
     const applied = [];
     if (d.hp) applied.push(`${d.hp > 0 ? '+' : ''}${d.hp} HP`);
     if (d.maxHp) applied.push(`${d.maxHp > 0 ? '+' : ''}${d.maxHp} Max HP`);
     if (d.goldAll) applied.push('gold → 0'); else if (d.gold) applied.push(`${d.gold > 0 ? '+' : ''}${d.gold} gold`);
-    flash(`${info.name}: “${o.choice}” logged${applied.length ? ' — ' + applied.join(', ') + ' applied automatically' : ''}${d.notes.length ? '. ' + d.notes.join('; ') : ''}.`);
-    STATE.eventId = '';
-    renderAll();
+    const nNow = takenCount(o.choice) + 1;
+    flash(`${info.name}: “${o.choice}”${nNow > 1 ? ` ×${nNow}` : ''}${applied.length ? ' — ' + applied.join(', ') + ' applied' : ''}${d.notes.length ? '. ' + d.notes.join('; ') : ''}. Take it again if the game lets you, or leave the event.`);
+    renderEventTab(); renderSetup(); renderDeck(); renderRelics(); renderOdds(); renderBoss();
   });
+  const lv = $('#evleave'); if (lv) lv.onclick = () => { STATE.eventId = ''; flash('Event closed.'); renderAll(); };
 }
 
 /* ---------- SHOP tab ---------- */
