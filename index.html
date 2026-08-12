@@ -1830,9 +1830,9 @@ function applyLiveSave(p, rawSave) {
     char: p.char, ascension: p.ascension, act: p.act, region: p.region, bossId: p.bossId,
     deck: p.deck, relics: p.relics, gold: p.gold, hp: p.hp, maxHp: p.maxHp, room: Math.min(p.room, ENGINE.actRooms(p.region)),
   });
-  if (charChanged) { STATE.history = []; STATE.relicLog = p.relics.map(id => ({ id, act: p.act, room: 0, source: 'live sync' })); }
+  if (charChanged) { STATE.history = []; STATE.relicLog = p.relics.map(id => ({ id, act: p.act, room: 0, source: LIVE.active ? 'live sync' : 'save import' })); }
   STATE.liveMap = p.map; STATE.liveVisited = p.visited;
-  flash(`⚡ Live sync: ${p.char} · act ${p.act} room ${p.room} · ${p.hp}/${p.maxHp} HP · ${p.gold}g · ${p.deck.length} cards, ${p.relics.length} relics.`);
+  flash(`${LIVE.active ? '⚡ Live sync' : '📂 Loaded save'}: ${p.char} · act ${p.act} room ${p.room} · ${p.hp}/${p.maxHp} HP · ${p.gold}g · ${p.deck.length} cards, ${p.relics.length} relics.`);
   applyLivePredictions(p, rawSave);
   renderAll();
   if (STATE.livePrediction?.kind === 'reward') runRecommend();
@@ -1905,7 +1905,7 @@ function applyLivePredictions(p, rawSave) {
 function renderLivePred() {
   const box = $('#livepred'); if (!box) return;
   const lp = STATE.livePrediction;
-  if (!lp || !LIVE.active) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  if (!lp || (!LIVE.active && !STATE.oneShot)) { box.style.display = 'none'; box.innerHTML = ''; return; }
   box.style.display = 'block';
   let h = '';
   if (lp.kind === 'reward') {
@@ -2072,10 +2072,34 @@ function renderLiveMap() {
     + `<div class="small" style="margin-top:6px"><b>Best route:</b> ${esc(steps)}${route.path.length > 8 ? ' → …' : ''} <span class="muted">(value ${Math.round(route.value)})</span></div>`
     + `<div class="small muted">Recomputed live from your position, HP, gold, deck, and lessons. ○ = you${route.startOptions ? ', dashed ring = recommended entry' : ''}.</div>`;
 }
+/* one-shot: read a single picked save (works on iOS Safari — no live polling needed) */
+function importSaveFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let save;
+    try { save = JSON.parse(reader.result); }
+    catch (e) { flash('That file isn’t a readable StS2 save (current_run.save is JSON).'); return; }
+    const parsed = ENGINE.parseSaveRun(save);
+    if (!parsed) { flash('Couldn’t read a run from that file — pick your current_run.save.'); return; }
+    STATE.oneShot = true;
+    applyLiveSave(parsed, save);
+  };
+  reader.onerror = () => flash('Could not read that file.');
+  reader.readAsText(file);
+}
+function wireFilePick(box) {
+  const fi = box.querySelector('#savefile');
+  if (fi) fi.onchange = e => { const f = e.target.files && e.target.files[0]; if (f) importSaveFile(f); e.target.value = ''; };
+}
 function renderLive() {
   const box = document.querySelector('#livesync'); if (!box) return;
   if (!('showDirectoryPicker' in window)) {
-    box.innerHTML = '<span class="small muted">Live game sync needs Chrome or Edge on desktop (open the GitHub Pages link).</span>';
+    // iPhone / iPad / Safari: no File System Access API → manual mode (everything works via what you enter)
+    box.innerHTML = `<div class="small muted">📱 <b>Manual mode.</b> Every advisor works from what you type — card options, shop, events, campfire, relics — plus upgrade/removal/transform/enchant advice, path guidance, the boss checklist, and run-learning. Live auto-tracking needs desktop Chrome/Edge.</div>
+      <label class="seg" style="width:100%;margin-top:6px;display:block;text-align:center;cursor:pointer">📂 Load a save file (one-shot)
+        <input type="file" id="savefile" style="display:none"></label>
+      <div class="small muted" style="margin-top:3px">Optional — if you can get your <code>current_run.save</code> onto this device (iCloud Drive / AirDrop), pick it to auto-fill the whole run and show one seed-based prediction.</div>`;
+    wireFilePick(box);
     return;
   }
   if (LIVE.active) {
@@ -2086,8 +2110,10 @@ function renderLive() {
       <div class="small muted" style="margin-top:3px">One click — reconnects to <code>C:\\Users\\Owner\\StS2Sync</code> automatically (first time on a device: pick that folder once; choose <b>“Allow on every visit”</b> and it connects by itself from then on).
       <br>One-time setup if the sync folder doesn't exist yet — Win+R, paste, Enter:<br>
       <code style="user-select:all">powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://beresfordcrick-a11y.github.io/spire-draft-advisor/livesync.txt' | iex"</code><br>
-      That installs a background mirror that starts with Windows — you never run it again.</div>`;
+      That installs a background mirror that starts with Windows — you never run it again.
+      <br><label style="cursor:pointer;text-decoration:underline">or load a save file once<input type="file" id="savefile" style="display:none"></label> (fallback if the folder picker is blocked).</div>`;
     box.querySelector('#livego').onclick = connectLive;
+    wireFilePick(box);
   }
 }
 
