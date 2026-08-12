@@ -1585,7 +1585,9 @@ function renderLive() {
   } else {
     box.innerHTML = `<button id="livego" class="seg" style="width:100%">⚡ Live-sync with the game (pick your StS2 save folder)</button>
       <div class="small muted" style="margin-top:3px">The tool reads the save after every room — deck, relics, HP, gold, map — automatically.
-      <br><b style="color:var(--warn)">Chrome blocks folders inside AppData</b> (and resolves links to them). Use the mirror script instead: run <b>Start-StS2-LiveSync.bat</b> (keeps a live copy of the save in <code>C:\\Users\\(you)\\StS2Sync</code>), then pick <b>StS2Sync</b> here. Ask Claude for the two-file script if you don't have it.</div>`;
+      <br><b style="color:var(--warn)">Chrome blocks folders inside AppData</b>, so a mirror script keeps a live copy in <code>C:\\Users\\(you)\\StS2Sync</code>. Start it: press Win+R and paste<br>
+      <code style="user-select:all">powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://beresfordcrick-a11y.github.io/spire-draft-advisor/StS2-LiveSync.ps1' | iex"</code><br>
+      Keep its green window open (minimized) while playing, then pick <b>StS2Sync</b> here.</div>`;
     box.querySelector('#livego').onclick = connectLive;
   }
 }
