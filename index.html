@@ -1137,6 +1137,10 @@ const ENGINE = (() => {
     const nodes = new Map();
     for (const pt of map.points) nodes.set(key(pt.coord), pt);
     if (map.boss) nodes.set(key(map.boss.coord), map.boss);
+    if (map.second_boss) nodes.set(key(map.second_boss.coord), map.second_boss);
+    // real saves keep the act-opening node (Neow/Ancient — or a fight in act 1) as a separate `start` point
+    const startPt = map.start && map.start.coord ? map.start : null;
+    if (startPt && !nodes.has(key(startPt.coord))) nodes.set(key(startPt.coord), startPt);
     const cur = visited && visited.length ? visited[visited.length - 1] : null;
     const memo = new Map();
     const best = coord => {
@@ -1150,21 +1154,39 @@ const ENGINE = (() => {
     };
     let result = { value: 0, path: [] };
     let startOptions = null;
-    // "before the first pick" = no visited coord that matches a real map node
-    const atActStart = !(cur && nodes.has(key(cur)));
+    // "before the first pick" = nothing visited, a coord that isn't a map node, or standing on the start node
+    const onStart = !!(cur && startPt && cur.col === startPt.coord.col && cur.row === startPt.coord.row);
+    const atActStart = onStart || !(cur && nodes.has(key(cur)));
     if (!atActStart) {
       let bc = null;
       for (const ch of (nodes.get(key(cur)).children || [])) { const r = best(ch); if (!bc || r.value > bc.value) bc = r; }
       if (bc) result = bc;
     } else {
+      // entry candidates: the start node's children → save's start_coords → lowest-row regular points
+      let entries = [];
+      if (startPt && startPt.children && startPt.children.length) entries = startPt.children.map(c => nodes.get(key(c))).filter(Boolean);
+      if (!entries.length && map.start_coords && map.start_coords.length) entries = map.start_coords.map(c => nodes.get(key(c))).filter(Boolean);
+      if (!entries.length && map.points.length) {
+        const minRow = Math.min(...map.points.map(pp => pp.coord.row));
+        entries = map.points.filter(pp => pp.coord.row === minRow);
+      }
       // rank every entry node by the value of its best full path to the boss
-      startOptions = map.points.filter(pp => pp.coord.row === 0)
+      startOptions = entries
         .sort((a, b) => a.coord.col - b.coord.col)
         .map((pt, i) => { const r = best(pt.coord); return { coord: pt.coord, type: pt.type, nth: i + 1, value: Math.round(r.value * 10) / 10, path: r.path }; });
       startOptions.sort((a, b) => b.value - a.value);
       if (startOptions.length) result = { value: startOptions[0].value, path: startOptions[0].path };
     }
-    return { ...result, startOptions, nodes: [...nodes.values()], current: atActStart ? null : cur, width: map.width || 7, height: map.height || (map.boss ? map.boss.coord.row + 1 : 15) };
+    // render bounds from the actual node coords (boss sits at row = grid height in real saves)
+    const allNodes = [...nodes.values()];
+    const rows = allNodes.map(n => n.coord.row), cols = allNodes.map(n => n.coord.col);
+    return {
+      ...result, startOptions, nodes: allNodes,
+      current: atActStart ? (onStart ? cur : null) : cur, onStart,
+      width: Math.max(map.width || 7, Math.max(...cols) + 1),
+      height: Math.max(...rows) + 1,
+      minRow: Math.min(...rows),
+    };
   }
 
   // ---- lessons: learn from finished runs
@@ -1665,7 +1687,7 @@ async function pollLive() {
 function liveNodeType(p) {
   if (!p.map || !p.visited || !p.visited.length) return null;
   const cur = p.visited[p.visited.length - 1];
-  const all = [...(p.map.points || []), p.map.boss].filter(Boolean);
+  const all = [...(p.map.points || []), p.map.boss, p.map.second_boss, p.map.start].filter(Boolean);
   const n = all.find(x => x.coord && x.coord.col === cur.col && x.coord.row === cur.row);
   return n ? n.type : null;
 }
