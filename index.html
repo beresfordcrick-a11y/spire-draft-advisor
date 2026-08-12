@@ -93,7 +93,9 @@ label.f{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.8p
 .deckrow{display:flex;align-items:center;gap:7px;padding:3px 2px;border-radius:5px;font-size:13px}
 .deckrow:hover{background:var(--panel2)}
 .deckrow .spacer{flex:1}
-.deckrow .up{color:var(--good);font-weight:700}
+.up{color:var(--good);font-weight:700}
+.mini.upg{border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+.mini.upg.on{color:var(--good);border-color:var(--good)}
 .mini{padding:1px 7px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted)}
 .mini:hover{border-color:var(--line);color:var(--ink)}
 .stat{margin-right:12px;font-size:12px;color:var(--muted)}
@@ -471,11 +473,12 @@ const ENGINE = (() => {
   // ---------- main scorer ----------
   const TIER_PTS = { S: 40, A: 32, B: 24, C: 16, D: 8 };
 
-  function scoreCard(cardId, ctx) {
+  function scoreCard(cardId, ctx, offeredUpgraded = false) {
     // ctx: {char, deck, act, progress, bossId, source}
     const c = card(cardId);
     if (!c) return null;
     const parts = [];
+    if (offeredUpgraded) parts.push({ k: 'upgraded', pts: 5, why: 'Offered pre-upgraded — a free smith on top' });
     const deck = ctx.deck;
     const excludeIds = new Set(deck.map(d => d.id)); excludeIds.add(c.id);
 
@@ -583,7 +586,7 @@ const ENGINE = (() => {
     if (dis) parts.push({ k: 'bloat', pts: Math.round(dis * 10) / 10, why: `Deck already has ${size} cards — mediocre adds dilute it` });
 
     const total = Math.max(0, Math.min(100, parts.reduce((s, p) => s + p.pts, 0)));
-    return { card: c, total: Math.round(total * 10) / 10, parts };
+    return { card: c, up: offeredUpgraded, total: Math.round(total * 10) / 10, parts };
   }
 
   // Skip threshold: how good an option must be to beat "keep the deck lean"
@@ -594,7 +597,10 @@ const ENGINE = (() => {
   }
 
   function recommend(optionIds, ctx) {
-    const scored = optionIds.filter(Boolean).map(id => scoreCard(id, ctx)).filter(Boolean);
+    // accepts card ids or {id, up} objects (up = offered pre-upgraded)
+    const scored = optionIds.filter(Boolean)
+      .map(o => typeof o === 'string' ? scoreCard(o, ctx) : scoreCard(o.id, ctx, !!o.up))
+      .filter(Boolean);
     scored.sort((a, b) => b.total - a.total);
     const thr = skipThreshold(ctx.deck, ctx.act);
     const best = scored[0];
@@ -1382,15 +1388,18 @@ function renderSlots() {
   STATE.slots.forEach((slot, i) => {
     const holder = el('div', 'slot');
     if (slot) {
-      const c = ENGINE.card(slot);
+      const c = ENGINE.card(slot.id);
       holder.appendChild(el('div', 'slotchip',
-        `<b>${esc(c.name)}</b> <span class="pill" style="color:${RARITY_COLORS[c.rarity]}">${c.rarity}</span><button class="x" title="clear">×</button>`));
+        `<b>${esc(c.name)}${slot.up ? '<span class="up">+</span>' : ''}</b> <span class="pill" style="color:${RARITY_COLORS[c.rarity]}">${c.rarity}</span>
+         <button class="mini upg ${slot.up ? 'on' : ''}" title="offered upgraded?">⚒ upgraded</button>
+         <button class="x" title="clear">×</button>`));
+      holder.querySelector('.upg').onclick = () => { slot.up = !slot.up; renderSlots(); };
       holder.querySelector('.x').onclick = () => { STATE.slots[i] = null; renderSlots(); };
     } else {
       const input = el('input', 'acinput'); input.placeholder = `Option ${i + 1} — type a card name…`;
       const dd = el('div', 'dropdown');
       holder.appendChild(input); holder.appendChild(dd);
-      attachAutocomplete(input, dd, () => searchableCards(false), cardRow, c => { STATE.slots[i] = c.id; renderSlots(); });
+      attachAutocomplete(input, dd, () => searchableCards(false), cardRow, c => { STATE.slots[i] = { id: c.id, up: false }; renderSlots(); });
     }
     wrap.appendChild(holder);
   });
@@ -1404,21 +1413,21 @@ function meter(score) {
   return `<div class="meter"><div class="fill" style="width:${pct}%"></div><span class="mval">${score}</span></div>`;
 }
 function runRecommend() {
-  const ids = STATE.slots.filter(Boolean);
+  const opts = STATE.slots.filter(Boolean);
   const out = $('#results');
-  if (!ids.length) { out.innerHTML = '<div class="muted small">Enter at least one card option above.</div>'; return; }
-  const rec = ENGINE.recommend(ids, ctx());
+  if (!opts.length) { out.innerHTML = '<div class="muted small">Enter at least one card option above.</div>'; return; }
+  const rec = ENGINE.recommend(opts, ctx());
   let h = `<div class="verdict ${rec.skip ? 'vskip' : 'vtake'}">${esc(rec.verdict)}</div>`;
   rec.options.forEach((o, idx) => {
     const c = o.card;
     const best = idx === 0 && !rec.skip;
     h += `<div class="opt ${best ? 'best' : ''}">
       <div class="opthead"><span class="rank">${idx + 1}</span>
-        <b style="color:${CHAR_COLORS[c.char] || 'inherit'}">${esc(c.name)}</b>
+        <b style="color:${CHAR_COLORS[c.char] || 'inherit'}">${esc(c.name)}${o.up ? '<span class="up">+</span>' : ''}</b>
         <span class="pill">${c.cost === null ? '–' : esc(c.cost)}⚡</span><span class="pill">${esc(c.type)}</span>
         <span class="pill" style="color:${RARITY_COLORS[c.rarity]}">${c.rarity}</span>
         ${c.tier ? `<span class="pill" style="color:${TIER_COLORS[c.tier]}">Tier ${c.tier}</span>` : '<span class="pill muted">untiered</span>'}
-        ${meter(o.total)}<button class="take" data-id="${c.id}">Take →</button></div>
+        ${meter(o.total)}<button class="take" data-id="${c.id}" data-up="${o.up ? 1 : ''}">Take →</button></div>
       <div class="small muted effect">${esc(c.effect)}</div>
       <div class="why">${o.parts.filter(p => p.pts !== 0 || p.k === 'synergy').map(p =>
         `<div class="whyrow"><span class="wpts ${p.pts < 0 ? 'neg' : ''}">${p.pts > 0 ? '+' : ''}${p.pts}</span> ${esc(p.why)}</div>`).join('')}</div></div>`;
@@ -1427,13 +1436,14 @@ function runRecommend() {
     <span class="muted small">skip bar: ${rec.threshold} · deck ${STATE.deck.length} cards</span></div>`;
   out.innerHTML = h;
   out.querySelectorAll('.take').forEach(b => b.onclick = () => {
-    STATE.deck.push({ id: b.dataset.id, up: false });
-    STATE.log.push({ took: b.dataset.id, offered: ids.slice() });
+    const up = !!b.dataset.up;
+    STATE.deck.push({ id: b.dataset.id, up });
+    STATE.log.push({ took: b.dataset.id, up, offered: opts.slice() });
     STATE.slots = [null, null, null];
-    renderAll(); $('#results').innerHTML = `<div class="muted small">Added ${esc(ENGINE.card(b.dataset.id).name)} to the deck.</div>`;
+    renderAll(); $('#results').innerHTML = `<div class="muted small">Added ${esc(ENGINE.card(b.dataset.id).name)}${up ? '+ (upgraded)' : ''} to the deck.</div>`;
   });
   $('#skipbtn').onclick = () => {
-    STATE.log.push({ took: null, offered: ids.slice() });
+    STATE.log.push({ took: null, offered: opts.slice() });
     STATE.slots = [null, null, null]; renderSlots();
     $('#results').innerHTML = '<div class="muted small">Skipped. Deck stays lean.</div>';
   };
