@@ -1747,6 +1747,16 @@ async function findSavesDir(dir, depth = 0) { // fallback: locate a "saves" fold
   return null;
 }
 async function connectLive() {
+  // 1) reuse the remembered StS2Sync folder — one click, no picker
+  try {
+    const saved = await idb.get('gamedir');
+    if (saved) {
+      let perm = await saved.queryPermission({ mode: 'read' });
+      if (perm === 'prompt') perm = await saved.requestPermission({ mode: 'read' }); // "Allow" chip, pick "every visit" to skip even this
+      if (perm === 'granted') { LIVE.dir = saved; await startLivePolling(); return; }
+    }
+  } catch (e) { }
+  // 2) first time on this device: pick the StS2Sync folder once
   try {
     const dir = await window.showDirectoryPicker({ id: 'sts2saves', mode: 'read' });
     LIVE.dir = dir;
@@ -2028,11 +2038,11 @@ function renderLive() {
     box.innerHTML = `<span class="small" style="color:${LIVE.saveHandle ? 'var(--good)' : 'var(--warn)'}">● ${LIVE.saveHandle ? 'LIVE — tracking your run from the game save' : 'Connected — waiting for a run to start…'}</span> <button class="ghost small" id="livestop">stop</button>`;
     box.querySelector('#livestop').onclick = () => { LIVE.active = false; clearInterval(LIVE.timer); STATE.liveMap = null; renderAll(); };
   } else {
-    box.innerHTML = `<button id="livego" class="seg" style="width:100%">⚡ Live-sync with the game (pick your StS2 save folder)</button>
-      <div class="small muted" style="margin-top:3px">The tool reads the save after every room — deck, relics, HP, gold, map — automatically.
-      <br><b style="color:var(--warn)">Chrome blocks folders inside AppData</b>, so a mirror script keeps a live copy in <code>C:\\Users\\(you)\\StS2Sync</code>. Start it: press Win+R and paste<br>
+    box.innerHTML = `<button id="livego" class="seg" style="width:100%">⚡ Live</button>
+      <div class="small muted" style="margin-top:3px">One click — reconnects to <code>C:\\Users\\Owner\\StS2Sync</code> automatically (first time on a device: pick that folder once; choose <b>“Allow on every visit”</b> and it connects by itself from then on).
+      <br>One-time setup if the sync folder doesn't exist yet — Win+R, paste, Enter:<br>
       <code style="user-select:all">powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://beresfordcrick-a11y.github.io/spire-draft-advisor/livesync.txt' | iex"</code><br>
-      Keep its green window open (minimized) while playing, then pick <b>StS2Sync</b> here.</div>`;
+      That installs a background mirror that starts with Windows — you never run it again.</div>`;
     box.querySelector('#livego').onclick = connectLive;
   }
 }

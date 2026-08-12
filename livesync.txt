@@ -1,17 +1,16 @@
-# StS2 Live-Sync mirror — copies the game's save into a Chrome-readable folder.
-# Keep this window open (minimized is fine) while you play.
+# StS2 Live-Sync — one-time installer + mirror.
+# Mirrors the game's save into C:\Users\(you)\StS2Sync where Chrome can read it.
+# On first run it also registers itself to start hidden with Windows, so you never run it again.
+
+$dst = Join-Path $env:USERPROFILE 'StS2Sync'
+$scriptPath = Join-Path $dst 'StS2-LiveSync.ps1'
+New-Item -ItemType Directory -Force -Path (Join-Path $dst 'saves\history') | Out-Null
+
+$mirrorScript = @'
 $src = Join-Path $env:APPDATA 'SlayTheSpire2'
 $dst = Join-Path $env:USERPROFILE 'StS2Sync'
 $mirror = Join-Path $dst 'saves\current_run.save'
 New-Item -ItemType Directory -Force -Path (Join-Path $dst 'saves\history') | Out-Null
-
-Write-Host ''
-Write-Host '  StS2 Live-Sync mirror is RUNNING' -ForegroundColor Green
-Write-Host "  Game saves : $src"
-Write-Host "  Mirror     : $dst   <- pick THIS folder in the advisor's Live-sync"
-Write-Host '  Minimize this window while you play. Press Ctrl+C to stop.'
-Write-Host ''
-
 while ($true) {
   try {
     $save = Get-ChildItem -Path $src -Recurse -Filter 'current_run.save' -ErrorAction SilentlyContinue |
@@ -19,13 +18,10 @@ while ($true) {
     if ($save) {
       if (-not (Test-Path $mirror) -or ($save.LastWriteTime -gt (Get-Item $mirror).LastWriteTime)) {
         Copy-Item $save.FullName $mirror -Force -ErrorAction SilentlyContinue
-        Write-Host ("  synced  " + (Get-Date -Format 'HH:mm:ss')) -ForegroundColor DarkGray
       }
     } elseif (Test-Path $mirror) {
       Remove-Item $mirror -Force -ErrorAction SilentlyContinue   # run over -> advisor records the result
-      Write-Host '  run ended - mirror cleared' -ForegroundColor Yellow
     }
-    # mirror run-history files so the advisor can read win/loss results
     Get-ChildItem -Path $src -Recurse -Filter '*.run' -ErrorAction SilentlyContinue | ForEach-Object {
       $target = Join-Path $dst ('saves\history\' + $_.Name)
       if (-not (Test-Path $target)) { Copy-Item $_.FullName $target -Force -ErrorAction SilentlyContinue }
@@ -33,3 +29,22 @@ while ($true) {
   } catch { }
   Start-Sleep -Seconds 2
 }
+'@
+Set-Content -Path $scriptPath -Value $mirrorScript -Encoding UTF8
+
+# register a hidden auto-start task for the current user (no admin needed)
+$taskName = 'StS2LiveSync'
+$action = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+schtasks /Create /F /SC ONLOGON /TN $taskName /TR $action | Out-Null
+
+# stop any previous copy, then start the mirror hidden right now
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -like '*StS2-LiveSync.ps1*' -and $_.ProcessId -ne $PID } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$scriptPath -WindowStyle Hidden
+
+Write-Host ''
+Write-Host '  StS2 Live-Sync installed and RUNNING (hidden, starts with Windows).' -ForegroundColor Green
+Write-Host "  Mirror folder: $dst  <- pick this ONCE in the advisor's Live button"
+Write-Host '  You can close this window.'
+Write-Host ''
