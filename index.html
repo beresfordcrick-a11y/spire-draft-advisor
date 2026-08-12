@@ -116,6 +116,10 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
 </header>
 <main>
   <div><!-- LEFT column -->
+    <div class="panel" id="mappanel" style="display:none">
+      <h2>Live map — best route</h2>
+      <div id="mapbox"></div>
+    </div>
     <div class="panel">
       <h2>1 · Run setup</h2>
       <div id="livesync" style="margin-bottom:10px"></div>
@@ -154,10 +158,6 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
     <div class="panel">
       <h2>Boss intel</h2>
       <div id="bossintel"></div>
-    </div>
-    <div class="panel" id="mappanel" style="display:none">
-      <h2>Live map — best route</h2>
-      <div id="mapbox"></div>
     </div>
     <div class="panel" id="oddspanel"><div id="odds"></div></div>
     <div class="panel"><div id="lessons"></div></div>
