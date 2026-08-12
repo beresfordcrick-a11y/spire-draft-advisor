@@ -1736,18 +1736,34 @@ function renderImproveTab() {
     flash(`Removed ${ENGINE.card(removed.id)?.name}${removed.up ? '+' : ''} — recommendations refreshed. (Shop removals: use the Shop tab so gold and pricing update too.)`);
     renderAll();
   });
-  // transforms
+  // transforms — full recommendation parity: ranked, reasoned, applied in place
   const tr = ENGINE.transformAdvice(c);
-  $('#trbox').innerHTML = (tr.candidates.length ? tr.candidates.map((e, i) =>
-    `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(e.card.name)}</b>
+  const pt = STATE.pendingTransform;
+  $('#trbox').innerHTML = (tr.candidates.length ? tr.candidates.map((e, i) => {
+    const active = pt && pt.id === e.card.id && pt.up === e.up;
+    return `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(e.card.name)}${e.up ? '+' : ''}</b>
      <span class="pill">${esc(e.verdict)}</span>
-     <button class="take" data-tr="${esc(e.card.id)}" data-trup="${e.up ? 1 : ''}">Transformed →</button></div></div>`).join('') : '<div class="muted small">No good transform targets.</div>')
-    + `<div class="small muted" style="margin-top:4px">Average quality of a random ${esc(STATE.char)} card: ${tr.poolAvg}/40 — transform anything you value below that. Tap “Transformed →” (or ⇄ on any deck card) and type what it became — the deck updates itself.</div>`;
+     ${e.evGain > 0 ? `<span class="pill" style="color:var(--good)">+${e.evGain} expected quality</span>` : `<span class="pill">${e.evGain} expected</span>`}
+     <button class="take" data-tr="${esc(e.card.id)}" data-trup="${e.up ? 1 : ''}">${active ? 'picking…' : 'Transformed →'}</button></div>
+     ${e.why?.length ? `<div class="why"><div class="whyrow">· ${e.why.map(esc).join(' · ')}</div></div>` : ''}
+     ${active ? `<div class="rowflex small" style="margin-top:6px"><span class="muted">became…</span>
+        <button class="mini upg ${pt.upResult ? 'on' : ''}" id="trupres">⚒ result upgraded</button>
+        <button class="ghost small" id="trcancel">cancel</button></div>
+      <div class="slot" style="margin-top:4px"><input class="acinput" id="trpick" placeholder="type the card it turned into…"><div class="dropdown" id="trpickdd"></div></div>` : ''}
+     </div>`;
+  }).join('') : '<div class="muted small">No good transform targets.</div>')
+    + `<div class="small muted" style="margin-top:4px">Average quality of a random ${esc(STATE.char)} card: ${tr.poolAvg}/40 — transform anything you value below that. (⇄ on any deck card works too.)</div>`;
   $('#trbox').querySelectorAll('[data-tr]').forEach(b => b.onclick = () => {
     STATE.pendingTransform = { id: b.dataset.tr, up: !!b.dataset.trup, upResult: false };
-    flash(`Type what ${ENGINE.card(b.dataset.tr)?.name || 'it'} turned into — picker is open on the card in your deck below.`);
-    renderAll();
+    renderImproveTab();
   });
+  const trPick = $('#trpick');
+  if (trPick && pt) {
+    attachAutocomplete(trPick, $('#trpickdd'), () => searchableCards(true), cardRow, cc => doTransform(pt.id, pt.up, cc.id, pt.upResult));
+    $('#trupres').onclick = () => { pt.upResult = !pt.upResult; renderImproveTab(); $('#trpick')?.focus(); };
+    $('#trcancel').onclick = () => { STATE.pendingTransform = null; renderImproveTab(); };
+    setTimeout(() => $('#trpick')?.focus(), 0);
+  }
   // enchant
   const esel = $('#enchsel');
   if (!esel.options.length) for (const e of DATA.enchantments) esel.appendChild(new Option(`${e.name}${e.rating ? ' (' + e.rating + ')' : ''} — ${e.effect.slice(0, 60)}`, e.id));
@@ -1825,7 +1841,7 @@ function renderDeck() {
         picker.appendChild(input); picker.appendChild(dd);
         attachAutocomplete(input, dd, () => searchableCards(true), cardRow, c => doTransform(pt.id, pt.up, c.id, pt.upResult));
         list.appendChild(picker);
-        setTimeout(() => input.focus(), 0);
+        if (STATE.tab !== 'improve') setTimeout(() => input.focus(), 0); // improve-tab picker keeps focus there
       }
     }
   }
