@@ -338,9 +338,11 @@ const ENGINE = (() => {
     if (shops) { priority.push('Shop'); reasons.push(`${shops} shop${shops > 1 ? 's' : ''}: ${curses ? `${curses} curse${curses > 1 ? 's' : ''} to remove` + ((ctx.gold ?? 0) >= 120 ? ' + ' : '') : ''}${(ctx.gold ?? 0) >= 120 ? `${ctx.gold} gold to spend (removal ${removalCost(ctx)}g)` : ''}`); }
 
     // rests: pre-boss rest is guaranteed; extra if hurt (unless you've been resting a lot)
+    const bossCaution = ctx.lessons && ctx.lessons.bossCaution;
     let rests = left >= 1 ? 1 : 0;
     if (hpFrac < 0.55 && left >= 3 && done.rest < 2) { rests++; reasons.push(`extra rest: HP ${Math.round(hpFrac * 100)}% — heal before committing to elites`); }
     else if (rests) reasons.push(`the guaranteed pre-boss campfire: ${hpFrac >= 0.7 ? 'smith (upgrade), don’t sleep' : 'heal unless an upgrade wins the boss fight'}`);
+    if (bossCaution && left <= 4) { if (!priority.includes('Rest')) priority.push('Rest'); reasons.push(`you have died to act bosses before — favor a rest/upgrade route into this boss and lean on the boss checklist below`); }
     if (ctx.act < 3 && left <= 3) reasons.push(`the Ancient at the next act's start heals ${ctx.ascension >= WEARY_LEVEL ? '80% of' : 'ALL'} missing HP — you only need enough HP to beat the boss, so smith over sleep if you can survive`);
 
     // fights fill the remainder (unknown rooms count ~half as fight rewards)
@@ -1131,10 +1133,18 @@ const ENGINE = (() => {
     const curses = deckC.filter(c => c.char === 'Curse' && !c.eternal).length;
     let thr = ELITE_HP_THRESHOLD[ctx.act] || 0.5;
     if (lessons && lessons.eliteCaution) thr += 0.07;
+    const bossCaution = lessons && lessons.bossCaution;
+    // approaching the boss? (last stretch of the act)
+    const total = actRooms(ctx.region, ctx.act);
+    const nearBoss = ctx.room != null && (total - ctx.room) <= 3;
     switch (type) {
       case 'monster': return 3;
       case 'elite': case 'burning_elite': return hpFrac >= thr ? (frontload >= 2 ? 8 : 6) : -5;
-      case 'rest_site': return hpFrac < 0.55 ? 7 : hpFrac < 0.75 ? 4 : 2.5;
+      case 'rest_site': {
+        let v = hpFrac < 0.55 ? 7 : hpFrac < 0.75 ? 4 : 2.5;
+        if (bossCaution && nearBoss) v += 3; // died to bosses before → value the pre-boss campfire more
+        return v;
+      }
       case 'merchant': case 'shop': return ((ctx.gold || 0) >= 150 || curses > 0) ? 6 : 1.5;
       case 'treasure': return 5;
       case 'unknown': case 'event': return 4;
@@ -1207,19 +1217,27 @@ const ENGINE = (() => {
     const char = CHAR_IDS[String(p.character_id || '').split('.').pop()] || '?';
     const deck = (p.deck || []).map(e => fromModelId('card', e.id)).filter(Boolean).map(id => ({ id, up: false }));
     const kb = String(h.killed_by_encounter || '');
+    // last map node you were standing on when the run ended tells us elite vs boss
+    const mph = h.map_point_history || [];
+    const lastEntry = mph[mph.length - 1];
+    const lastType = Array.isArray(lastEntry) ? (lastEntry[lastEntry.length - 1] || {}).map_point_type : (lastEntry && lastEntry.map_point_type);
+    const win = !!h.win, abandoned = !!h.was_abandoned;
+    const killedByBoss = !win && !abandoned && (/BOSS/.test(kb) || lastType === 'boss');
+    const killedByElite = !win && !abandoned && !killedByBoss && (/ELITE/.test(kb) || lastType === 'elite');
     return {
-      char, asc: h.ascension | 0, win: !!h.win, abandoned: !!h.was_abandoned,
+      char, asc: h.ascension | 0, win, abandoned,
       killedBy: kb ? kb.split('.').pop() : (h.killed_by_event ? String(h.killed_by_event).split('.').pop() : null),
-      killedByElite: /ELITE/.test(kb),
+      killedByElite, killedByBoss, deathAct: killedByBoss ? mph.length : undefined,
       archetypes: topArchetypes(deck, 3).map(a => a[0]),
-      rooms: (h.map_point_history || []).length,
+      rooms: mph.length,
     };
   }
   function lessonsFromRuns(runs) {
     const real = runs.filter(r => !r.abandoned);
-    const byCharArch = {}; let eliteDeaths = 0;
+    const byCharArch = {}; let eliteDeaths = 0, bossDeaths = 0;
     for (const r of real) {
       if (!r.win && r.killedByElite) eliteDeaths++;
+      if (!r.win && r.killedByBoss) bossDeaths++;
       for (const a of (r.archetypes || [])) {
         const k = r.char + '|' + a;
         byCharArch[k] = byCharArch[k] || { w: 0, l: 0 };
@@ -1238,7 +1256,8 @@ const ENGINE = (() => {
       }
     }
     if (eliteDeaths >= 2) notes.push(`${eliteDeaths} deaths to elites → elite HP bar raised 7%`);
-    return { archAdj, eliteCaution: eliteDeaths >= 2, runCount: real.length, notes };
+    if (bossDeaths >= 2) notes.push(`${bossDeaths} deaths to act bosses → prioritizing pre-boss prep (rest/smith, walk in healthier, upgrade the boss answers)`);
+    return { archAdj, eliteCaution: eliteDeaths >= 2, bossCaution: bossDeaths >= 2, eliteDeaths, bossDeaths, runCount: real.length, notes };
   }
 
   // ---------- v9: seed-accurate offer prediction (xoshiro256** port of the game's RNG) ----------
@@ -1490,10 +1509,12 @@ const ENGINE = (() => {
     const ups = upgradeAdvice(ctx, 3);
     const top = ups[0] || null;
     const ancientHealsNext = (ctx.ascension | 0) >= WEARY_LEVEL && (ctx.act || 1) < 4;
+    const bossCaution = ctx.lessons && ctx.lessons.bossCaution;
     const restWhy = [], smithWhy = [];
     let rest = Math.min(45, (1 - hpFrac) * 90);
     if (hpFrac < 0.45) { rest += 10; restWhy.push('HP is dangerously low'); }
     if (nearBoss && hpFrac < 0.65) { rest += 12; restWhy.push('boss is close — walk in healthy'); }
+    if (bossCaution && nearBoss && hpFrac < 0.8) { rest += 8; restWhy.push('your past runs died to act bosses — bank the HP'); }
     if (gain < heal * 0.6) { rest -= 10; restWhy.push(`${heal - gain} of the ${heal} HP heal would be wasted`); }
     if (nearBoss && ancientHealsNext && hpFrac >= 0.6) { rest -= 8; smithWhy.push("next act's Ancient heals 80% of missing HP right after the boss"); }
     let smith = 16 + (top ? Math.min(22, top.score * 1.4) : 0);
@@ -1929,15 +1950,15 @@ async function onRunEnded() {
       }
     }
   } catch (e) { }
-  if (!rec) rec = { char: STATE.char, asc: STATE.ascension, win: null, abandoned: false, killedBy: null, killedByElite: false, archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length };
+  if (!rec) rec = { char: STATE.char, asc: STATE.ascension, win: null, abandoned: false, killedBy: null, killedByElite: false, killedByBoss: false, archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length };
   if (rec.win == null) {
     // couldn't read the result file — ask
     rec.win = await askYesNo('Run over! Did you win?', 'Victory', 'Defeat');
-    if (!rec.win) rec.killedByElite = await askYesNo('Did an elite kill you?', 'Yes', 'No');
+    if (!rec.win) { const cause = await askDeathCause(); rec.killedByBoss = cause === 'boss'; rec.killedByElite = cause === 'elite'; }
   }
   pushRun(rec);
   STATE.liveMap = null; STATE.liveVisited = null; STATE.livePrediction = null;
-  flash(`Run recorded: ${rec.win ? 'VICTORY' : 'defeat'}${rec.killedBy ? ' (killed by ' + rec.killedBy.toLowerCase().replace(/_/g, ' ') + ')' : ''} — lessons updated.`);
+  flash(`Run recorded: ${rec.win ? 'VICTORY' : (rec.killedByBoss ? 'defeat to the act boss' : rec.killedByElite ? 'defeat to an elite' : 'defeat')}${rec.killedBy ? ' (' + rec.killedBy.toLowerCase().replace(/_/g, ' ') + ')' : ''} — lessons updated.`);
   renderAll();
 }
 
@@ -1957,6 +1978,27 @@ function askYesNo(question, yesLabel = 'Yes', noLabel = 'No') {
     box.querySelector('#yn-yes').focus();
   });
 }
+// multi-option picker → returns the chosen option's `value`
+function askChoice(question, options) {
+  return new Promise(resolve => {
+    const overlay = el('div', '', '');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999;display:flex;align-items:center;justify-content:center';
+    const btns = options.map((o, i) => `<button class="seg${i === 0 ? ' on' : ''}" data-i="${i}" style="flex:1">${esc(o.label)}</button>`).join('');
+    const box = el('div', 'panel', `<div style="font-size:15px;margin-bottom:12px">${esc(question)}</div><div class="rowflex">${btns}</div>`);
+    box.style.cssText = 'max-width:400px;padding:16px 18px;border:1px solid rgba(255,255,255,.15);border-radius:10px;background:var(--panel)';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    box.querySelectorAll('[data-i]').forEach(b => b.onclick = () => { overlay.remove(); resolve(options[+b.dataset.i].value); });
+    box.querySelector('[data-i]').focus();
+  });
+}
+async function askDeathCause() {
+  return askChoice('What ended the run?', [
+    { label: 'Act boss', value: 'boss' },
+    { label: 'Elite', value: 'elite' },
+    { label: 'Something else', value: 'other' },
+  ]);
+}
 
 /* ---------- lessons persistence ---------- */
 function loadRuns() { try { return JSON.parse((store && store.getItem('sda_runs')) || '[]'); } catch (e) { return []; } }
@@ -1974,13 +2016,15 @@ function renderLessons() {
   for (const r of runs.filter(x => !x.abandoned)) { byChar[r.char] = byChar[r.char] || { w: 0, l: 0 }; r.win ? byChar[r.char].w++ : byChar[r.char].l++; }
   let h = `<div class="grouphead">Lessons (${L.runCount} run${L.runCount === 1 ? '' : 's'} recorded)</div>`;
   h += `<div class="small muted">${Object.entries(byChar).map(([c, v]) => `${c} ${v.w}W/${v.l}L`).join(' · ') || 'No finished runs yet — live sync records them automatically, or use the buttons.'}</div>`;
+  if (L.bossDeaths || L.eliteDeaths) h += `<div class="small muted">Deaths: ${L.bossDeaths ? `${L.bossDeaths} to act bosses` : ''}${L.bossDeaths && L.eliteDeaths ? ' · ' : ''}${L.eliteDeaths ? `${L.eliteDeaths} to elites` : ''}.</div>`;
   if (L.notes && L.notes.length) h += L.notes.map(n => `<div class="whyrow small">· ${esc(n)}</div>`).join('');
   h += `<div class="rowflex" style="margin-top:6px"><button class="ghost small" id="recwin">Record win</button><button class="ghost small" id="recloss">Record loss</button></div>`;
   box.innerHTML = h;
   const mk = win => async () => {
-    const killedByElite = !win && await askYesNo('Did an elite kill you?', 'Yes', 'No');
-    pushRun({ char: STATE.char, asc: STATE.ascension, win, abandoned: false, killedBy: null, killedByElite, archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length });
-    flash(`Run recorded as ${win ? 'win' : 'loss'} — future recommendations adjust.`);
+    let killedByElite = false, killedByBoss = false;
+    if (!win) { const cause = await askDeathCause(); killedByBoss = cause === 'boss'; killedByElite = cause === 'elite'; }
+    pushRun({ char: STATE.char, asc: STATE.ascension, win, abandoned: false, killedBy: null, killedByElite, killedByBoss, archetypes: ENGINE.topArchetypes(STATE.deck, 3).map(a => a[0]), rooms: STATE.history.length });
+    flash(`Run recorded as ${win ? 'win' : (killedByBoss ? 'loss (act boss)' : killedByElite ? 'loss (elite)' : 'loss')} — future recommendations adjust.`);
     renderAll();
   };
   box.querySelector('#recwin').onclick = mk(true);
