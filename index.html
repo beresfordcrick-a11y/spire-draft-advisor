@@ -960,22 +960,36 @@ const ENGINE = (() => {
     if ((ctx.relics || []).includes('BurningBlood')) { h += 6; why.push('Burning Blood +6'); }
     return { heal: h, why };
   }
-  // parse an event option's outcome text into automatic HP/gold deltas
-  function parseEventDeltas(text) {
+  // parse an outcome text (event option, blessing, relic pickup) into automatic deltas
+  function parseOutcomeDeltas(text) {
     const t = (text || '').toLowerCase();
-    const d = { hp: 0, gold: 0, goldAll: false, notes: [] };
+    const d = { hp: 0, gold: 0, goldAll: false, maxHp: 0, notes: [] };
     let m;
-    if ((m = t.match(/lose (\d+) hp|take (\d+) damage/))) d.hp -= +(m[1] || m[2]);
+    // max HP first so plain-HP patterns don't double count
+    if ((m = t.match(/(?:gain|\+)\s?(\d+) max hp|(\d+) max hp gain/))) d.maxHp += +(m[1] || m[2]);
+    if ((m = t.match(/(?:lose|−|-)\s?(\d+) max hp/))) d.maxHp -= +m[1];
+    if ((m = t.match(/lose (\d+) hp(?! max)|take (\d+) damage/))) d.hp -= +(m[1] || m[2]);
     if ((m = t.match(/heal (\d+)|regain (\d+) hp|restore (\d+) hp/))) d.hp += +(m[1] || m[2] || m[3]);
     if ((m = t.match(/gain (\d+) gold|\+(\d+) gold|receive (\d+) gold/))) d.gold += +(m[1] || m[2] || m[3]);
     if ((m = t.match(/pay (\d+)|lose (\d+) gold|costs? (\d+) gold/))) d.gold -= +(m[1] || m[2] || m[3]);
     if (/lose all( your)? gold/.test(t)) d.goldAll = true;
-    if (/max hp/.test(t)) d.notes.push('Max HP change — adjust the Max field');
-    if (/card|curse|relic|potion/.test(t)) d.notes.push('cards/relics/potions: add them via the trackers');
+    if (/\bcard\b|\bcards\b/.test(t) && /choose|obtain|add|pick|transform|remove|upgrade/.test(t)) d.notes.push('card changes: apply them in the deck panel');
+    if (/potion/.test(t)) d.notes.push('potions: not tracked — grab them in game');
     return d;
   }
+  const parseEventDeltas = parseOutcomeDeltas; // back-compat alias
+  // Does a blessing/relic effect persist (a kept relic) vs resolve instantly?
+  function isPersistentEffect(text) {
+    return /at the (start|end)|every |whenever |each (turn|combat|time)|per (turn|combat)|during |in elite combats|combats? reward|rest sites?|from now on/i.test(text || '');
+  }
+  // find curse cards named inside a drawback text ("A 'Greed' curse is added…")
+  function cursesInText(text) {
+    const t = (text || '').toLowerCase();
+    if (!/curse|injury|added to your deck/.test(t)) return [];
+    return ENGINE.DATA.cards.filter(c => c.char === 'Curse' && t.includes(c.name.toLowerCase())).map(c => c.id);
+  }
 
-  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, historyThisAct, goldReward, restHeal, afterCombatHeal, parseEventDeltas, ancientHeal, startHp, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL, WEARY_LEVEL };
+  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, historyThisAct, goldReward, restHeal, afterCombatHeal, parseEventDeltas, parseOutcomeDeltas, isPersistentEffect, cursesInText, ancientHeal, startHp, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL, WEARY_LEVEL };
 })();
 
 if (typeof module !== 'undefined') module.exports = ENGINE;
@@ -997,7 +1011,7 @@ const STATE = {
   ascension: 0, gold: 99, hp: 80, maxHp: 80, removalsUsed: 0,
   deck: [], relics: [], slots: [null, null, null], source: 'fight', log: [],
   tab: 'draft', ancient: 'Neow', ancientSlots: [null, null, null], eventId: '',
-  shopItems: [], ench: 'Sharp', history: [], pending: null,
+  shopItems: [], ench: 'Sharp', history: [], pending: null, relicLog: [],
 };
 
 function starterDeck(ch) { return DATA.chars[ch].deck.map(id => ({ id, up: false })); }
@@ -1011,8 +1025,34 @@ function resetRun(ch) {
     gold: 99, hp, maxHp, removalsUsed: 0,
     ancient: 'Neow', ancientSlots: [null, null, null], eventId: '', shopItems: [],
     history: [], pending: null,
+    relicLog: starterRelics(ch).map(id => ({ id, act: 1, room: 0, source: 'start' })),
   });
   renderAll();
+}
+
+/* ---------- relic acquisition (tracked + on-pickup outcomes) ---------- */
+function inferRelicSource() {
+  const last = STATE.history[STATE.history.length - 1];
+  if (!last || last.act !== STATE.act) return 'manual';
+  return { elite: 'elite drop', treasure: 'chest', event: 'event', ancient: 'ancient', shop: 'shop', boss: 'boss' }[last.type] || 'manual';
+}
+function addRelicOwned(id, source) {
+  if (STATE.relics.includes(id)) { flash('You already hold that relic.'); return; }
+  const r = DATA.relics.find(x => x.id === id);
+  STATE.relics.push(id);
+  STATE.relicLog.push({ id, act: STATE.act, room: STATE.room, source: source || inferRelicSource() });
+  let msg = `${r ? r.name : id} added (${source || inferRelicSource()}, act ${STATE.act} room ${STATE.room}).`;
+  // apply on-pickup outcomes only when the effect says so
+  if (r && /upon pickup|on pickup|when obtained/i.test(r.effect)) {
+    const d = ENGINE.parseOutcomeDeltas(r.effect);
+    if (d.gold) { STATE.gold = Math.max(0, STATE.gold + d.gold); msg += ` ${d.gold > 0 ? '+' : ''}${d.gold} gold applied.`; }
+    if (d.maxHp) { STATE.maxHp += d.maxHp; STATE.hp += Math.max(0, d.maxHp); msg += ` ${d.maxHp > 0 ? '+' : ''}${d.maxHp} Max HP applied.`; }
+    if (d.hp) { STATE.hp += d.hp; msg += ` ${d.hp > 0 ? '+' : ''}${d.hp} HP applied.`; }
+    clampHp();
+    if (d.notes.length) msg += ' ' + d.notes.join('; ') + '.';
+    if (/enchant/i.test(r.effect)) { msg += ' Use the Improve tab to pick enchant targets.'; }
+  }
+  flash(msg);
 }
 function ctx() {
   return {
@@ -1096,7 +1136,16 @@ function undoLast() {
   } else if (h.type === 'treasure') STATE.gold -= ENGINE.goldReward('treasure', ctx());
   else if (h.type === 'rest' && h.detail?.mode === 'sleep') STATE.hp -= ENGINE.restHeal(ctx());
   else if (h.type === 'event' && h.detail?.deltas) { STATE.hp -= h.detail.deltas.hp; STATE.gold -= h.detail.deltas.gold; }
-  else if (h.type === 'ancient' && h.detail?.healed) { STATE.hp -= h.detail.healed; }
+  else if (h.type === 'ancient') {
+    if (h.detail?.healed) STATE.hp -= h.detail.healed;
+    for (const dd of [h.detail?.deltas, h.detail?.drawbackDeltas]) {
+      if (!dd) continue;
+      STATE.hp -= dd.hp || 0; STATE.gold -= dd.gold || 0;
+      if (dd.maxHp) { STATE.maxHp -= dd.maxHp; if (dd.maxHp > 0) STATE.hp -= dd.maxHp; }
+    }
+    if (h.detail?.relicAdded) { STATE.relics = STATE.relics.filter(x => x !== h.detail.relicAdded); STATE.relicLog = STATE.relicLog.filter(x => x.id !== h.detail.relicAdded); }
+    for (const cid of (h.detail?.cursesAdded || [])) { const i = STATE.deck.findIndex(x => x.id === cid); if (i >= 0) STATE.deck.splice(i, 1); }
+  }
   clampHp();
   if (h.type !== 'boss') STATE.room = Math.max(1, h.room);
   flash('Undid last room (auto HP/gold reversed; check card/relic changes yourself).');
@@ -1210,9 +1259,10 @@ function renderRelicTracker() {
   for (const rid of STATE.relics) {
     const r = DATA.relics.find(x => x.id === rid);
     if (!r) continue;
+    const lg = STATE.relicLog.find(x => x.id === rid);
     const chip = el('span', 'relchip', `${esc(r.name)}<button class="x" title="remove">×</button>`);
-    chip.title = r.effect;
-    chip.querySelector('.x').onclick = () => { STATE.relics = STATE.relics.filter(x => x !== rid); renderAll(); };
+    chip.title = r.effect + (lg ? `\n— taken: ${lg.source}, act ${lg.act}${lg.room ? ' room ' + lg.room : ''}` : '');
+    chip.querySelector('.x').onclick = () => { STATE.relics = STATE.relics.filter(x => x !== rid); STATE.relicLog = STATE.relicLog.filter(x => x.id !== rid); renderAll(); };
     box.appendChild(chip);
   }
   if (!STATE.relics.length) box.innerHTML = '<span class="small muted">none yet</span>';
@@ -1221,9 +1271,9 @@ function renderRelicTracker() {
   if (!input.dataset.wired) {
     input.dataset.wired = '1';
     attachAutocomplete(input, dd,
-      () => DATA.relics.filter(r => !STATE.relics.includes(r.id) && (r.char === 'Shared' || r.char === STATE.char || r.char === 'Event')),
+      () => DATA.relics.filter(r => !STATE.relics.includes(r.id) && (r.char === 'Shared' || r.char === STATE.char || r.char === 'Event' || r.rarity === 'Ancient')),
       r => `<b>${esc(r.name)}</b> <span class="pill" style="color:${RARITY_COLORS[r.rarity] || 'var(--muted)'}">${r.rarity}</span> ${r.rating ? `<span class="pill" style="color:${TIER_COLORS[r.rating]}">${r.rating}</span>` : ''} <span class="muted small">${esc((r.effect || '').slice(0, 46))}</span>`,
-      r => { STATE.relics.push(r.id); input.value = ''; renderAll(); });
+      r => { addRelicOwned(r.id); input.value = ''; renderAll(); });
   }
 }
 
@@ -1427,11 +1477,48 @@ function renderAncientTab() {
       h += `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span>
         <b>${esc(o.name)}</b>${o.pool === 'curse' ? ' <span class="pill warn">cursed trade</span>' : ''}
         ${o.rating ? `<span class="pill" style="color:${TIER_COLORS[o.rating]}">${o.rating}</span>` : ''}
-        ${meter(Math.round(a.score * 2.4))}</div>
+        ${meter(Math.round(a.score * 2.4))}
+        <button class="take" data-took="${esc(o.id)}">Took this</button></div>
         <div class="small muted effect">${esc(o.effect)}${o.drawback ? ' — <span style="color:var(--warn)">' + esc(o.drawback) + '</span>' : ''}</div>
         <div class="why">${a.why.map(w => `<div class="whyrow">· ${esc(w)}</div>`).join('')}</div></div>`;
     });
     box.innerHTML = h;
+    box.querySelectorAll('[data-took]').forEach(btn => btn.onclick = () => {
+      const o = adv.find(x => x.opt.id === btn.dataset.took)?.opt; if (!o) return;
+      const applied = [], detail = { ancient: STATE.ancient, took: o.id };
+      // instant outcomes from the blessing text
+      const d = ENGINE.parseOutcomeDeltas(o.effect);
+      if (d.gold) { STATE.gold = Math.max(0, STATE.gold + d.gold); applied.push(`${d.gold > 0 ? '+' : ''}${d.gold} gold`); }
+      if (d.goldAll) { STATE.gold = 0; applied.push('gold → 0'); }
+      if (d.maxHp) { STATE.maxHp += d.maxHp; if (d.maxHp > 0) STATE.hp += d.maxHp; applied.push(`${d.maxHp > 0 ? '+' : ''}${d.maxHp} Max HP`); }
+      if (d.hp) { STATE.hp += d.hp; applied.push(`${d.hp > 0 ? '+' : ''}${d.hp} HP`); }
+      // drawback outcomes (cursed trades)
+      const cursesAdded = [];
+      if (o.drawback) {
+        const dd2 = ENGINE.parseOutcomeDeltas(o.drawback);
+        if (dd2.gold) { STATE.gold = Math.max(0, STATE.gold + dd2.gold); applied.push(`${dd2.gold} gold`); }
+        if (dd2.goldAll) { STATE.gold = 0; applied.push('gold → 0'); }
+        if (dd2.maxHp) { STATE.maxHp += dd2.maxHp; applied.push(`${dd2.maxHp} Max HP`); }
+        if (dd2.hp) { STATE.hp += dd2.hp; applied.push(`${dd2.hp} HP`); }
+        detail.drawbackDeltas = dd2;
+        for (const cid of ENGINE.cursesInText(o.drawback)) {
+          STATE.deck.push({ id: cid, up: false }); cursesAdded.push(cid);
+          applied.push(`${ENGINE.card(cid)?.name || cid} curse → deck`);
+        }
+      }
+      clampHp();
+      detail.deltas = d; detail.cursesAdded = cursesAdded;
+      // persistent blessings are relics you keep — track them with source 'ancient'
+      if (ENGINE.isPersistentEffect(o.effect)) { addRelicOwned(o.id, `ancient (${STATE.ancient})`); detail.relicAdded = o.id; }
+      // attach to the tracker's ancient entry for this room, or log fresh
+      const last = STATE.history[STATE.history.length - 1];
+      if (last && last.type === 'ancient' && !last.detail?.took) last.detail = { ...(last.detail || {}), ...detail };
+      else STATE.history.push({ act: STATE.act, room: STATE.room, type: 'ancient', detail });
+      const notes = d.notes.length ? ' ' + d.notes.join('; ') + '.' : '';
+      flash(`${STATE.ancient}: took ${o.name}${applied.length ? ' — ' + applied.join(', ') + ' applied automatically' : ''}.${notes}`);
+      STATE.ancientSlots = [null, null, null];
+      renderAll();
+    });
   };
 }
 
@@ -1462,14 +1549,17 @@ function renderEventTab() {
   box.innerHTML = h;
   box.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => {
     const o = info.options[+b.dataset.opt];
-    const d = ENGINE.parseEventDeltas(o.outcome);
-    STATE.hp += d.hp; if (d.goldAll) STATE.gold = 0; STATE.gold = Math.max(0, STATE.gold + d.gold); clampHp();
+    const d = ENGINE.parseOutcomeDeltas(o.outcome);
+    STATE.hp += d.hp; if (d.goldAll) STATE.gold = 0; STATE.gold = Math.max(0, STATE.gold + d.gold);
+    if (d.maxHp) { STATE.maxHp += d.maxHp; if (d.maxHp > 0) STATE.hp += d.maxHp; }
+    clampHp();
     // attach to the tracker's event entry for this room, or log fresh if none
     const last = STATE.history[STATE.history.length - 1];
     if (last && last.type === 'event' && !last.detail) last.detail = { event: info.id, choice: o.choice, deltas: d };
     else logRoom('event', { event: info.id, choice: o.choice, deltas: d });
     const applied = [];
     if (d.hp) applied.push(`${d.hp > 0 ? '+' : ''}${d.hp} HP`);
+    if (d.maxHp) applied.push(`${d.maxHp > 0 ? '+' : ''}${d.maxHp} Max HP`);
     if (d.goldAll) applied.push('gold → 0'); else if (d.gold) applied.push(`${d.gold > 0 ? '+' : ''}${d.gold} gold`);
     flash(`${info.name}: “${o.choice}” logged${applied.length ? ' — ' + applied.join(', ') + ' applied automatically' : ''}${d.notes.length ? '. ' + d.notes.join('; ') : ''}.`);
     STATE.eventId = '';
@@ -1536,7 +1626,7 @@ function renderShopTab() {
       STATE.gold -= e.price;
       let msg = `Bought ${e.label} for ${e.price}g (gold auto-updated: ${STATE.gold} left).`;
       if (e.kind === 'card') { STATE.deck.push({ id: e.id, up: false }); msg += ' Added to deck.'; }
-      else if (e.kind === 'relic') { if (!STATE.relics.includes(e.id)) STATE.relics.push(e.id); msg += ' Added to relics.'; }
+      else if (e.kind === 'relic') { addRelicOwned(e.id, 'shop'); msg += ' Added to relics.'; }
       else if (e.kind === 'removal') {
         STATE.removalsUsed++;
         const target = ENGINE.removalAdvice(ctx(), 1)[0];
@@ -1661,7 +1751,7 @@ function renderRelics() {
 }
 
 /* ---------- save / load ---------- */
-const SAVE_KEYS = ['char', 'act', 'region', 'bossId', 'room', 'ascension', 'gold', 'hp', 'maxHp', 'removalsUsed', 'deck', 'relics', 'log', 'history'];
+const SAVE_KEYS = ['char', 'act', 'region', 'bossId', 'room', 'ascension', 'gold', 'hp', 'maxHp', 'removalsUsed', 'deck', 'relics', 'log', 'history', 'relicLog'];
 function migrateSave(s) { // older saves used progress/path instead of room
   if (s.room == null && s.progress) s.room = { early: 2, mid: 7, late: 12 }[s.progress] || 1;
   delete s.progress; delete s.path; delete s.usePath;
