@@ -121,6 +121,7 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
       <div id="acts"></div>
       <div id="regions" style="margin-top:2px"></div>
       <div id="roomwrap" class="rowflex small" style="margin-top:6px"></div>
+      <div id="roomtracker"></div>
       <label class="f">Act boss (from the map)</label>
       <div id="bosses"></div>
       <label class="f">Ascension</label>
@@ -286,6 +287,11 @@ const ENGINE = (() => {
   // Given room number, deck, HP, gold, relic pace: recommend how to spend the
   // remaining rooms of this act. Replaces manual path entry.
   const ELITE_HP_THRESHOLD = { 1: 0.60, 2: 0.50, 3: 0.40 };
+  function historyThisAct(ctx) {
+    const done = { fight: 0, elite: 0, shop: 0, rest: 0, event: 0, treasure: 0, boss: 0 };
+    for (const h of (ctx.history || [])) if (h.act === ctx.act && done[h.type] != null) done[h.type]++;
+    return done;
+  }
   function recommendPath(ctx) {
     const total = actRooms(ctx.region);
     const room = Math.min(Math.max(1, ctx.room || 1), total + 1);
@@ -298,28 +304,31 @@ const ENGINE = (() => {
     const relicCount = (ctx.relics || []).length;
     const expectedRelics = 1 + (ctx.act - 1) * 2.5 + (room / total) * 2; // starter + ~2.5/act pace
     const behindOnRelics = relicCount < expectedRelics - 1;
+    const done = historyThisAct(ctx);
 
-    // elites
+    // elites: act target minus the ones you've already fought this act
     const thr = ELITE_HP_THRESHOLD[ctx.act] || 0.5;
-    let elites = 0;
-    if (left >= 2) {
-      if (hpFrac >= thr && frontload >= 2) elites = Math.min(2, Math.floor(left / 4) + 1);
-      else if (hpFrac >= thr) elites = 1;
-      if (behindOnRelics && elites < 2 && hpFrac >= thr - 0.08 && left >= 4) elites++;
-      elites = Math.min(elites, ctx.ascension >= 1 ? 3 : 2, Math.floor(left / 2));
-    }
-    if (elites >= 1) { priority.push('Elite'); reasons.push(`${elites} elite${elites > 1 ? 's' : ''}: HP ${Math.round(hpFrac * 100)}% ≥ ${Math.round(thr * 100)}% act-${ctx.act} bar${behindOnRelics ? ', and you are behind on relics' : ''} — each elite pays a relic`); }
+    let eliteTarget = 0;
+    if (hpFrac >= thr && frontload >= 2) eliteTarget = 2;
+    else if (hpFrac >= thr) eliteTarget = 1;
+    if (behindOnRelics && eliteTarget < 2 && hpFrac >= thr - 0.08) eliteTarget++;
+    let elites = Math.max(0, eliteTarget - done.elite);
+    elites = Math.min(elites, Math.floor(left / 2));
+    if (left < 2) elites = 0;
+    if (elites >= 1) { priority.push('Elite'); reasons.push(`${elites} more elite${elites > 1 ? 's' : ''}${done.elite ? ` (${done.elite} already fought this act)` : ''}: HP ${Math.round(hpFrac * 100)}% ≥ ${Math.round(thr * 100)}% act-${ctx.act} bar${behindOnRelics ? ', and you are behind on relics' : ''} — each elite pays a relic`); }
+    else if (done.elite >= eliteTarget && done.elite > 0 && left >= 2) reasons.push(`elite quota met (${done.elite} fought this act) — bank the HP for the boss`);
     else if (left >= 2) reasons.push(`skip elites: ${hpFrac < thr ? `HP ${Math.round(hpFrac * 100)}% is under the ${Math.round(thr * 100)}% act-${ctx.act} bar` : 'deck lacks frontload damage'} — take fights and recover`);
 
-    // shops
+    // shops: less appealing if you've already shopped and spent down
     let shops = 0;
     if (left >= 1 && ((ctx.gold ?? 0) >= 120 || curses > 0)) shops = 1;
     if (left >= 6 && (ctx.gold ?? 0) >= 280) shops = 2;
+    if (done.shop >= 1 && (ctx.gold ?? 0) < 200) { if (shops) reasons.push(`already shopped this act and only ${ctx.gold}g — skip further shops`); shops = 0; }
     if (shops) { priority.push('Shop'); reasons.push(`${shops} shop${shops > 1 ? 's' : ''}: ${curses ? `${curses} curse${curses > 1 ? 's' : ''} to remove` + ((ctx.gold ?? 0) >= 120 ? ' + ' : '') : ''}${(ctx.gold ?? 0) >= 120 ? `${ctx.gold} gold to spend (removal ${removalCost(ctx)}g)` : ''}`); }
 
-    // rests: pre-boss rest is guaranteed; extra if hurt
+    // rests: pre-boss rest is guaranteed; extra if hurt (unless you've been resting a lot)
     let rests = left >= 1 ? 1 : 0;
-    if (hpFrac < 0.55 && left >= 3) { rests++; reasons.push(`extra rest: HP ${Math.round(hpFrac * 100)}% — heal before committing to elites`); }
+    if (hpFrac < 0.55 && left >= 3 && done.rest < 2) { rests++; reasons.push(`extra rest: HP ${Math.round(hpFrac * 100)}% — heal before committing to elites`); }
     else if (rests) reasons.push(`the guaranteed pre-boss campfire: ${hpFrac >= 0.7 ? 'smith (upgrade), don’t sleep' : 'heal unless an upgrade wins the boss fight'}`);
 
     // fights fill the remainder (unknown rooms count ~half as fight rewards)
@@ -924,7 +933,36 @@ const ENGINE = (() => {
     return { entries, plan, goldLeft: gold, removalCost: rcost };
   }
 
-  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL };
+  // ---------- automatic bookkeeping helpers ----------
+  const POVERTY_LEVEL = 3;
+  const GOLD_REWARDS = { fight: 15, elite: 40, boss: 100, treasure: 47 }; // averages from code (10–20 / 35–45 / 100 / 42–52)
+  function goldReward(type, ctx) {
+    const base = GOLD_REWARDS[type] || 0;
+    return Math.round(base * (ctx.ascension >= POVERTY_LEVEL ? 0.75 : 1));
+  }
+  function restHeal(ctx) { return Math.round((ctx.maxHp || 0) * 0.30); }
+  function afterCombatHeal(ctx) {
+    // relic-driven post-combat healing we can safely automate
+    let h = 0; const why = [];
+    if ((ctx.relics || []).includes('BurningBlood')) { h += 6; why.push('Burning Blood +6'); }
+    return { heal: h, why };
+  }
+  // parse an event option's outcome text into automatic HP/gold deltas
+  function parseEventDeltas(text) {
+    const t = (text || '').toLowerCase();
+    const d = { hp: 0, gold: 0, goldAll: false, notes: [] };
+    let m;
+    if ((m = t.match(/lose (\d+) hp|take (\d+) damage/))) d.hp -= +(m[1] || m[2]);
+    if ((m = t.match(/heal (\d+)|regain (\d+) hp|restore (\d+) hp/))) d.hp += +(m[1] || m[2] || m[3]);
+    if ((m = t.match(/gain (\d+) gold|\+(\d+) gold|receive (\d+) gold/))) d.gold += +(m[1] || m[2] || m[3]);
+    if ((m = t.match(/pay (\d+)|lose (\d+) gold|costs? (\d+) gold/))) d.gold -= +(m[1] || m[2] || m[3]);
+    if (/lose all( your)? gold/.test(t)) d.goldAll = true;
+    if (/max hp/.test(t)) d.notes.push('Max HP change — adjust the Max field');
+    if (/card|curse|relic|potion/.test(t)) d.notes.push('cards/relics/potions: add them via the trackers');
+    return d;
+  }
+
+  return { init, card, charPool, colorlessPool, deckTagCounts, topArchetypes, remainingRewards, tagSlotProb, tagAvailability, scoreCard, recommend, skipThreshold, relicWatchlist, bossChecklist, bossById, actRegion, deckGaps, NEEDMAP, effOdds, removalCost, potionSlots, upgradeAdvice, removalAdvice, transformAdvice, enchantTargets, ancientAdvice, eventInfo, eventsForRegion, shopAdvice, recommendPath, actRooms, historyThisAct, goldReward, restHeal, afterCombatHeal, parseEventDeltas, SCARCITY_LEVEL, INFLATION_LEVEL, DOUBLEBOSS_LEVEL };
 })();
 
 if (typeof module !== 'undefined') module.exports = ENGINE;
@@ -946,7 +984,7 @@ const STATE = {
   ascension: 0, gold: 99, hp: 80, maxHp: 80, removalsUsed: 0,
   deck: [], relics: [], slots: [null, null, null], source: 'fight', log: [],
   tab: 'draft', ancient: 'Neow', ancientSlots: [null, null, null], eventId: '',
-  shopItems: [], ench: 'Sharp',
+  shopItems: [], ench: 'Sharp', history: [], pending: null,
 };
 
 function starterDeck(ch) { return DATA.chars[ch].deck.map(id => ({ id, up: false })); }
@@ -958,6 +996,7 @@ function resetRun(ch) {
     act: 1, region: 'Overgrowth', bossId: '?', room: 1,
     gold: 99, hp, maxHp: hp, removalsUsed: 0,
     ancient: 'Neow', ancientSlots: [null, null, null], eventId: '', shopItems: [],
+    history: [], pending: null,
   });
   renderAll();
 }
@@ -966,9 +1005,81 @@ function ctx() {
     char: STATE.char, deck: STATE.deck, act: STATE.act, room: STATE.room,
     region: STATE.region, bossId: STATE.bossId, source: STATE.source,
     ascension: STATE.ascension, gold: STATE.gold, hp: STATE.hp, maxHp: STATE.maxHp,
-    removalsUsed: STATE.removalsUsed, relics: STATE.relics,
+    removalsUsed: STATE.removalsUsed, relics: STATE.relics, history: STATE.history,
   };
 }
+
+/* ---------- room tracker: log rooms, auto-adjust HP & gold ---------- */
+function clampHp() { STATE.hp = Math.max(0, Math.min(STATE.maxHp, STATE.hp)); }
+function logRoom(type, detail) {
+  STATE.history.push({ act: STATE.act, room: STATE.room, type, detail: detail || null });
+  const total = ENGINE.actRooms(STATE.region);
+  if (type !== 'boss' && STATE.room < total) STATE.room++;
+}
+function startRoom(type) {
+  if (type === 'fight' || type === 'elite' || type === 'boss') {
+    STATE.pending = { type, ask: 'hp' };
+  } else if (type === 'rest') {
+    STATE.pending = { type, ask: 'rest' };
+  } else if (type === 'event') {
+    logRoom('event'); STATE.tab = 'event'; STATE.pending = null;
+    flash(`Event logged (room ${STATE.room - 1}). Pick it below and tap the option you chose — HP/gold apply automatically.`);
+  } else if (type === 'shop') {
+    logRoom('shop'); STATE.tab = 'shop'; STATE.pending = null;
+    flash(`Shop logged. Enter what's for sale — “Bought” buttons deduct gold automatically.`);
+  } else if (type === 'treasure') {
+    const g = ENGINE.goldReward('treasure', ctx());
+    STATE.gold += g; logRoom('treasure'); STATE.pending = null;
+    flash(`Treasure: +${g} gold (auto). Add the relic from the chest to your relics list.`);
+  }
+  renderAll();
+}
+function finishCombat(hpLost) {
+  const p = STATE.pending; if (!p) return;
+  STATE.hp -= Math.max(0, hpLost);
+  const heal = ENGINE.afterCombatHeal(ctx());
+  if (heal.heal && STATE.hp > 0) { STATE.hp += heal.heal; }
+  clampHp();
+  const g = ENGINE.goldReward(p.type, ctx());
+  STATE.gold += g;
+  logRoom(p.type, { hpLost });
+  const bits = [`+${g} gold (auto)`];
+  if (heal.heal) bits.push(heal.why.join(', ') + ' (auto)');
+  flash(`${p.type === 'elite' ? 'Elite' : p.type === 'boss' ? 'Boss' : 'Fight'} logged: −${hpLost} HP, ${bits.join(', ')}.${p.type === 'elite' ? ' Add the relic it dropped!' : ''}${p.type === 'boss' ? ' Switch to the next act when you continue.' : ' Enter the card reward in the Card reward tab.'}`);
+  STATE.pending = null;
+  renderAll();
+}
+function finishRest(mode) {
+  if (mode === 'sleep') {
+    const h = ENGINE.restHeal(ctx());
+    STATE.hp += h; clampHp();
+    logRoom('rest', { mode });
+    flash(`Rested: +${h} HP (auto).`);
+  } else {
+    logRoom('rest', { mode });
+    STATE.tab = 'improve';
+    flash('Smithed — the Improve tab shows which upgrade to take. Tap ⚒ on the card once upgraded.');
+  }
+  STATE.pending = null;
+  renderAll();
+}
+function undoLast() {
+  const h = STATE.history.pop();
+  if (!h) return;
+  // best-effort reversal of automatic effects
+  if (h.type === 'fight' || h.type === 'elite' || h.type === 'boss') {
+    STATE.gold -= ENGINE.goldReward(h.type, ctx());
+    if (h.detail) { STATE.hp += h.detail.hpLost || 0; STATE.hp -= ENGINE.afterCombatHeal(ctx()).heal; }
+  } else if (h.type === 'treasure') STATE.gold -= ENGINE.goldReward('treasure', ctx());
+  else if (h.type === 'rest' && h.detail?.mode === 'sleep') STATE.hp -= ENGINE.restHeal(ctx());
+  else if (h.type === 'event' && h.detail?.deltas) { STATE.hp -= h.detail.deltas.hp; STATE.gold -= h.detail.deltas.gold; }
+  clampHp();
+  if (h.type !== 'boss') STATE.room = Math.max(1, h.room);
+  flash('Undid last room (auto HP/gold reversed; check card/relic changes yourself).');
+  renderAll();
+}
+let flashMsg = '';
+function flash(m) { flashMsg = m; }
 
 /* ---------- run setup ---------- */
 function regionsForAct(act) { return DATA.acts.filter(a => a.act === act); }
@@ -1026,7 +1137,47 @@ function renderSetup() {
     bosses.appendChild(btn);
   }
   renderRelicTracker();
+  renderRoomTracker();
   renderPathAdvice();
+}
+
+/* ---------- room tracker UI ---------- */
+function renderRoomTracker() {
+  const box = $('#roomtracker');
+  let h = '<div class="grouphead">I just entered a…</div>';
+  if (STATE.pending?.ask === 'hp') {
+    h += `<div class="rowflex small">${STATE.pending.type === 'elite' ? 'Elite' : STATE.pending.type === 'boss' ? 'Boss' : 'Fight'} — HP lost:
+      <input type="number" id="hplost" class="num" style="width:60px" min="0" value="0">
+      <button id="combatok" class="seg on">Done</button><button id="combatcancel" class="ghost small">cancel</button></div>`;
+  } else if (STATE.pending?.ask === 'rest') {
+    h += `<div class="rowflex small">Campfire:
+      <button id="restsleep" class="seg on">Slept (+${ENGINE.restHeal(ctx())} HP)</button>
+      <button id="restsmith" class="seg">Smithed</button><button id="restcancel" class="ghost small">cancel</button></div>`;
+  } else {
+    h += `<div class="rowflex">
+      <button class="seg" data-room="fight">Fight</button><button class="seg" data-room="elite">Elite</button>
+      <button class="seg" data-room="event">Event</button><button class="seg" data-room="shop">Shop</button>
+      <button class="seg" data-room="rest">Rest</button><button class="seg" data-room="treasure">Treasure</button>
+      <button class="seg" data-room="boss">Boss</button></div>`;
+  }
+  const done = ENGINE.historyThisAct(ctx());
+  const parts = ['fight', 'elite', 'event', 'shop', 'rest', 'treasure'].filter(k => done[k]).map(k => `${done[k]} ${k}${done[k] > 1 ? 's' : ''}`);
+  h += `<div class="small muted" style="margin-top:4px">This act: ${parts.length ? parts.join(' · ') : 'nothing logged yet'}${STATE.history.length ? ' <button id="undoroom" class="ghost small">undo last</button>' : ''}</div>`;
+  if (flashMsg) { h += `<div class="small" style="color:var(--good);margin-top:4px">${esc(flashMsg)}</div>`; flashMsg = ''; }
+  box.innerHTML = h;
+  box.querySelectorAll('[data-room]').forEach(b => b.onclick = () => startRoom(b.dataset.room));
+  const u = $('#undoroom'); if (u) u.onclick = undoLast;
+  const ok = $('#combatok'); if (ok) {
+    ok.onclick = () => finishCombat(+$('#hplost').value || 0);
+    $('#hplost').focus();
+    $('#hplost').onkeydown = e => { if (e.key === 'Enter') finishCombat(+$('#hplost').value || 0); };
+    $('#combatcancel').onclick = () => { STATE.pending = null; renderRoomTracker(); };
+  }
+  const rs = $('#restsleep'); if (rs) {
+    rs.onclick = () => finishRest('sleep');
+    $('#restsmith').onclick = () => finishRest('smith');
+    $('#restcancel').onclick = () => { STATE.pending = null; renderRoomTracker(); };
+  }
 }
 
 /* ---------- owned relics tracker ---------- */
@@ -1274,15 +1425,32 @@ function renderEventTab() {
   if (!info) { box.innerHTML = ''; return; }
   let h = '';
   if (info.approx) h += `<div class="small" style="color:var(--warn)">Community data thin for this event — options below are decoded from game code and may read rough.</div>`;
-  info.options.forEach(o => {
+  info.options.forEach((o, i) => {
     h += `<div class="opt ${o.isBest ? 'best' : ''}"><div class="opthead"><b>${esc(o.choice || '(option)')}</b>
       ${o.isBest ? '<span class="pill" style="color:var(--good)">community pick</span>' : ''}
-      ${o.flags.map(f => `<span class="pill" style="color:${f.kind === 'danger' ? 'var(--bad)' : 'var(--warn)'}">${esc(f.text)}</span>`).join('')}</div>
+      ${o.flags.map(f => `<span class="pill" style="color:${f.kind === 'danger' ? 'var(--bad)' : 'var(--warn)'}">${esc(f.text)}</span>`).join('')}
+      <button class="take" data-opt="${i}">I chose this</button></div>
       <div class="small muted">${esc(o.outcome)}</div></div>`;
   });
   if (info.best) h += `<div class="verdict vtake small">☞ ${esc(info.best)}</div>`;
   if (info.cond) h += `<div class="small muted" style="margin-top:4px">Conditions: ${esc(info.cond)}</div>`;
+  h += `<div id="evapplied" class="small" style="color:var(--good);margin-top:6px"></div>`;
   box.innerHTML = h;
+  box.querySelectorAll('[data-opt]').forEach(b => b.onclick = () => {
+    const o = info.options[+b.dataset.opt];
+    const d = ENGINE.parseEventDeltas(o.outcome);
+    STATE.hp += d.hp; if (d.goldAll) STATE.gold = 0; STATE.gold = Math.max(0, STATE.gold + d.gold); clampHp();
+    // attach to the tracker's event entry for this room, or log fresh if none
+    const last = STATE.history[STATE.history.length - 1];
+    if (last && last.type === 'event' && !last.detail) last.detail = { event: info.id, choice: o.choice, deltas: d };
+    else logRoom('event', { event: info.id, choice: o.choice, deltas: d });
+    const applied = [];
+    if (d.hp) applied.push(`${d.hp > 0 ? '+' : ''}${d.hp} HP`);
+    if (d.goldAll) applied.push('gold → 0'); else if (d.gold) applied.push(`${d.gold > 0 ? '+' : ''}${d.gold} gold`);
+    flash(`${info.name}: “${o.choice}” logged${applied.length ? ' — ' + applied.join(', ') + ' applied automatically' : ''}${d.notes.length ? '. ' + d.notes.join('; ') : ''}.`);
+    STATE.eventId = '';
+    renderAll();
+  });
 }
 
 /* ---------- SHOP tab ---------- */
@@ -1333,10 +1501,27 @@ function renderShopTab() {
       const afford = e.price <= STATE.gold;
       h += `<div class="opt"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(e.label)}</b>
         <span class="pill">${e.price}g${afford ? '' : ' — can’t afford'}</span>
-        <span class="pill">value ${e.value}</span><span class="pill">per-100g: ${e.vpg}</span></div>
+        <span class="pill">value ${e.value}</span><span class="pill">per-100g: ${e.vpg}</span>
+        ${afford ? `<button class="take" data-buy="${i}">Bought</button>` : ''}</div>
         ${e.why?.length ? `<div class="why">${e.why.map(w => `<div class="whyrow">· ${esc(w)}</div>`).join('')}</div>` : ''}</div>`;
     });
     $('#shopresults').innerHTML = h;
+    $('#shopresults').querySelectorAll('[data-buy]').forEach(b => b.onclick = () => {
+      const e = sa.entries[+b.dataset.buy];
+      if (e.price > STATE.gold) return;
+      STATE.gold -= e.price;
+      let msg = `Bought ${e.label} for ${e.price}g (gold auto-updated: ${STATE.gold} left).`;
+      if (e.kind === 'card') { STATE.deck.push({ id: e.id, up: false }); msg += ' Added to deck.'; }
+      else if (e.kind === 'relic') { if (!STATE.relics.includes(e.id)) STATE.relics.push(e.id); msg += ' Added to relics.'; }
+      else if (e.kind === 'removal') {
+        STATE.removalsUsed++;
+        const target = ENGINE.removalAdvice(ctx(), 1)[0];
+        if (target) { const idx = STATE.deck.findIndex(x => x.id === target.card.id); if (idx >= 0) STATE.deck.splice(idx, 1); msg += ` Removed ${target.card.name} from the deck.`; }
+      }
+      STATE.shopItems = STATE.shopItems.filter(x => x.id !== e.id);
+      flash(msg);
+      renderAll();
+    });
   };
 }
 
@@ -1452,7 +1637,7 @@ function renderRelics() {
 }
 
 /* ---------- save / load ---------- */
-const SAVE_KEYS = ['char', 'act', 'region', 'bossId', 'room', 'ascension', 'gold', 'hp', 'maxHp', 'removalsUsed', 'deck', 'relics', 'log'];
+const SAVE_KEYS = ['char', 'act', 'region', 'bossId', 'room', 'ascension', 'gold', 'hp', 'maxHp', 'removalsUsed', 'deck', 'relics', 'log', 'history'];
 function migrateSave(s) { // older saves used progress/path instead of room
   if (s.room == null && s.progress) s.room = { early: 2, mid: 7, late: 12 }[s.progress] || 1;
   delete s.progress; delete s.path; delete s.usePath;
