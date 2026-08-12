@@ -822,6 +822,7 @@ const ENGINE = (() => {
     const rule = ENCH_RULES[enchId] || { f: () => true, w: () => 0, hint: '' };
     const seen = new Set(), out = [];
     for (const d of ctx.deck) {
+      if (d.ench) continue; // already enchanted — one enchantment per card
       const key = d.id + (d.up ? '+' : ''); if (seen.has(key)) continue; seen.add(key);
       const c = card(d.id); if (!c || c.char === 'Curse') continue;
       if (c.tags.includes('unplayable')) continue;
@@ -1163,6 +1164,15 @@ function undoLast() {
         if (dd.maxHp) { STATE.maxHp -= dd.maxHp; if (dd.maxHp > 0) STATE.hp -= dd.maxHp; }
       }
     }
+  }
+  else if (h.type === 'upgrade' && h.detail) {
+    const d = STATE.deck.find(x => x.id === h.detail.id && x.up); if (d) d.up = false;
+  }
+  else if (h.type === 'removal' && h.detail) {
+    STATE.deck.push({ id: h.detail.id, up: h.detail.up, ench: h.detail.ench || undefined });
+  }
+  else if (h.type === 'enchant' && h.detail) {
+    const d = STATE.deck.find(x => x.id === h.detail.id && x.up === h.detail.up && x.ench === h.detail.ench); if (d) delete d.ench;
   }
   else if (h.type === 'transform' && h.detail) {
     const j = STATE.deck.findIndex(x => x.id === h.detail.to.id && x.up === h.detail.to.up);
@@ -1696,17 +1706,36 @@ function renderImproveTab() {
   $('#upbox').innerHTML = up.length ? up.map((u, i) =>
     `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(u.card.name)}</b>
      ${u.card.tier ? `<span class="pill" style="color:${TIER_COLORS[u.card.tier]}">${u.card.tier}</span>` : ''}
-     <span class="pill">score ${u.score}</span></div>
+     <span class="pill">score ${u.score}</span>
+     <button class="take" data-doup="${esc(u.card.id)}">Upgraded ✓</button></div>
      <div class="small muted">${esc(u.card.effect)}</div>
      <div class="why"><div class="whyrow">· ${u.why.map(esc).join(' · ')}</div></div></div>`).join('')
     : '<div class="muted small">Everything is upgraded already.</div>';
+  $('#upbox').querySelectorAll('[data-doup]').forEach(b => b.onclick = () => {
+    const d = STATE.deck.find(x => x.id === b.dataset.doup && !x.up);
+    if (!d) return;
+    d.up = true;
+    STATE.history.push({ act: STATE.act, room: STATE.room, type: 'upgrade', detail: { id: d.id } });
+    flash(`Upgraded ${ENGINE.card(d.id)?.name} — recommendations refreshed.`);
+    renderAll();
+  });
   // removals
   const rm = ENGINE.removalAdvice(c);
   $('#rmbox').innerHTML = rm.length ? rm.map((e, i) =>
     `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(e.card.name)}${e.up ? '+' : ''}</b>
-     <span class="pill">value ${e.score}</span></div>
+     <span class="pill">value ${e.score}</span>
+     <button class="take" data-dorm="${esc(e.card.id)}" data-dormup="${e.up ? 1 : ''}">Removed ✓</button></div>
      <div class="why"><div class="whyrow">· ${e.why.map(esc).join(' · ')}</div></div></div>`).join('')
     : '<div class="muted small">Nothing worth removing yet.</div>';
+  $('#rmbox').querySelectorAll('[data-dorm]').forEach(b => b.onclick = () => {
+    const upFlag = !!b.dataset.dormup;
+    const i = STATE.deck.findIndex(x => x.id === b.dataset.dorm && x.up === upFlag);
+    if (i < 0) return;
+    const removed = STATE.deck.splice(i, 1)[0];
+    STATE.history.push({ act: STATE.act, room: STATE.room, type: 'removal', detail: { id: removed.id, up: removed.up, ench: removed.ench || null } });
+    flash(`Removed ${ENGINE.card(removed.id)?.name}${removed.up ? '+' : ''} — recommendations refreshed. (Shop removals: use the Shop tab so gold and pricing update too.)`);
+    renderAll();
+  });
   // transforms
   const tr = ENGINE.transformAdvice(c);
   $('#trbox').innerHTML = (tr.candidates.length ? tr.candidates.map((e, i) =>
@@ -1729,8 +1758,19 @@ function renderImproveTab() {
   $('#enchbox').innerHTML = `<div class="small muted" style="margin:4px 0">${esc(ench?.effect || '')}${et.hint ? ' — <i>' + esc(et.hint) + '</i>' : ''}${ench?.best ? '<br>Community: ' + esc(ench.best) : ''}</div>`
     + (et.targets.length ? et.targets.map((t, i) =>
       `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(t.card.name)}${t.up ? '+' : ''}</b>
-       <span class="pill">fit ${t.score}</span></div></div>`).join('')
+       <span class="pill">fit ${t.score}</span>
+       <button class="take" data-doench="${esc(t.card.id)}" data-doenchup="${t.up ? 1 : ''}">Enchanted ✓</button></div></div>`).join('')
       : '<div class="muted small">No legal targets in your deck for this enchantment.</div>');
+  $('#enchbox').querySelectorAll('[data-doench]').forEach(b => b.onclick = () => {
+    const upFlag = !!b.dataset.doenchup;
+    const d = STATE.deck.find(x => x.id === b.dataset.doench && x.up === upFlag && !x.ench);
+    if (!d) return;
+    d.ench = STATE.ench;
+    STATE.history.push({ act: STATE.act, room: STATE.room, type: 'enchant', detail: { id: d.id, up: d.up, ench: STATE.ench } });
+    const en = DATA.enchantments.find(x => x.id === STATE.ench);
+    flash(`Enchanted ${ENGINE.card(d.id)?.name}${d.up ? '+' : ''} with ${en?.name || STATE.ench} ✦ — it now shows on the card in your deck.`);
+    renderAll();
+  });
 }
 
 /* ---------- deck panel ---------- */
@@ -1740,7 +1780,7 @@ function renderDeck() {
     <span class="muted">· starts with <b>${esc((DATA.relics.find(r => r.id === info.relic) || {}).name || info.relic)}</b></span>
     <div class="small muted">${esc(info.relicText)}</div>`;
   const counts = {};
-  for (const d of STATE.deck) { const k = d.id + (d.up ? '+' : ''); counts[k] = counts[k] || { ...d, n: 0 }; counts[k].n++; }
+  for (const d of STATE.deck) { const k = d.id + (d.up ? '+' : '') + (d.ench ? '#' + d.ench : ''); counts[k] = counts[k] || { ...d, n: 0 }; counts[k].n++; }
   const list = $('#decklist'); list.innerHTML = '';
   const groups = { Attack: [], Skill: [], Power: [], Other: [] };
   for (const e of Object.values(counts)) {
@@ -1752,16 +1792,19 @@ function renderDeck() {
     list.appendChild(el('div', 'grouphead', `${g}s <span class="muted">(${arr.reduce((s, x) => s + x.n, 0)})</span>`));
     arr.sort((a, b) => (a.c.cost ?? 9) - (b.c.cost ?? 9) || a.c.name.localeCompare(b.c.name));
     for (const e of arr) {
+      const enchName = e.ench ? (DATA.enchantments.find(x => x.id === e.ench)?.name || e.ench) : null;
       const row = el('div', 'deckrow',
         `<span class="cost">${e.c.cost === null ? '–' : esc(e.c.cost)}</span>
          <b>${esc(e.c.name)}${e.up ? '<span class="up">+</span>' : ''}</b>
+         ${enchName ? `<span class="pill" style="color:var(--accent)">✦ ${esc(enchName)}</span>` : ''}
          ${e.n > 1 ? `<span class="pill">×${e.n}</span>` : ''}
          ${e.c.tier ? `<span class="pill" style="color:${TIER_COLORS[e.c.tier]}">${e.c.tier}</span>` : ''}
          <span class="spacer"></span><button class="mini" title="toggle upgrade">⚒</button><button class="mini" title="transformed into…">⇄</button><button class="mini" title="remove one">−</button>`);
+      const same = x => x.id === e.id && x.up === e.up && (x.ench || null) === (e.ench || null);
       const [upB, trB, rmB] = row.querySelectorAll('.mini');
-      upB.onclick = () => { const d = STATE.deck.find(x => x.id === e.id && x.up === e.up); if (d) d.up = !d.up; renderAll(); };
+      upB.onclick = () => { const d = STATE.deck.find(same); if (d) d.up = !d.up; renderAll(); };
       trB.onclick = () => { STATE.pendingTransform = { id: e.id, up: e.up, upResult: false }; renderDeck(); };
-      rmB.onclick = () => { const i = STATE.deck.findIndex(x => x.id === e.id && x.up === e.up); if (i >= 0) STATE.deck.splice(i, 1); renderAll(); };
+      rmB.onclick = () => { const i = STATE.deck.findIndex(same); if (i >= 0) STATE.deck.splice(i, 1); renderAll(); };
       row.title = e.c.effect;
       list.appendChild(row);
       // inline transform picker under the card being transformed
