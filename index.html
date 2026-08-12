@@ -1094,18 +1094,15 @@ function startRoom(type) {
   }
   renderAll();
 }
-function finishCombat(hpLost) {
+function finishCombat(hpAfter) {
   const p = STATE.pending; if (!p) return;
-  STATE.hp -= Math.max(0, hpLost);
-  const heal = ENGINE.afterCombatHeal(ctx());
-  if (heal.heal && STATE.hp > 0) { STATE.hp += heal.heal; }
-  clampHp();
+  const hpBefore = STATE.hp;
+  STATE.hp = Math.max(0, Math.min(STATE.maxHp, hpAfter));
+  const delta = STATE.hp - hpBefore;
   const g = ENGINE.goldReward(p.type, ctx());
   STATE.gold += g;
-  logRoom(p.type, { hpLost });
-  const bits = [`+${g} gold (auto)`];
-  if (heal.heal) bits.push(heal.why.join(', ') + ' (auto)');
-  flash(`${p.type === 'elite' ? 'Elite' : p.type === 'boss' ? 'Boss' : 'Fight'} logged: −${hpLost} HP, ${bits.join(', ')}.${p.type === 'elite' ? ' Add the relic it dropped!' : ''}${p.type === 'boss' ? ' Switch to the next act when you continue.' : ' Enter the card reward in the Card reward tab.'}`);
+  logRoom(p.type, { hpBefore, hpAfter: STATE.hp });
+  flash(`${p.type === 'elite' ? 'Elite' : p.type === 'boss' ? 'Boss' : 'Fight'} logged: HP ${hpBefore} → ${STATE.hp} (${delta > 0 ? '+' : ''}${delta}), +${g} gold (auto).${p.type === 'elite' ? ' Add the relic it dropped!' : ''}${p.type === 'boss' ? ' Switch to the next act when you continue.' : ' Enter the card reward in the Card reward tab.'}`);
   STATE.pending = null;
   renderAll();
 }
@@ -1132,7 +1129,8 @@ function undoLast() {
   // best-effort reversal of automatic effects
   if (h.type === 'fight' || h.type === 'elite' || h.type === 'boss') {
     STATE.gold -= ENGINE.goldReward(h.type, ctx());
-    if (h.detail) { STATE.hp += h.detail.hpLost || 0; STATE.hp -= ENGINE.afterCombatHeal(ctx()).heal; }
+    if (h.detail?.hpBefore != null) STATE.hp = h.detail.hpBefore;
+    else if (h.detail) { STATE.hp += h.detail.hpLost || 0; STATE.hp -= ENGINE.afterCombatHeal(ctx()).heal; }
   } else if (h.type === 'treasure') STATE.gold -= ENGINE.goldReward('treasure', ctx());
   else if (h.type === 'rest' && h.detail?.mode === 'sleep') STATE.hp -= ENGINE.restHeal(ctx());
   else if (h.type === 'event' && h.detail?.deltas) { STATE.hp -= h.detail.deltas.hp; STATE.gold -= h.detail.deltas.gold; }
@@ -1219,8 +1217,8 @@ function renderRoomTracker() {
   const box = $('#roomtracker');
   let h = '<div class="grouphead">I just entered a…</div>';
   if (STATE.pending?.ask === 'hp') {
-    h += `<div class="rowflex small">${STATE.pending.type === 'elite' ? 'Elite' : STATE.pending.type === 'boss' ? 'Boss' : 'Fight'} — HP lost:
-      <input type="number" id="hplost" class="num" style="width:60px" min="0" value="0">
+    h += `<div class="rowflex small">${STATE.pending.type === 'elite' ? 'Elite' : STATE.pending.type === 'boss' ? 'Boss' : 'Fight'} over — your HP now:
+      <input type="number" id="hpafter" class="num" style="width:64px" min="0" max="${STATE.maxHp}" value="${STATE.hp}"> / ${STATE.maxHp}
       <button id="combatok" class="seg on">Done</button><button id="combatcancel" class="ghost small">cancel</button></div>`;
   } else if (STATE.pending?.ask === 'rest') {
     h += `<div class="rowflex small">Campfire:
@@ -1241,9 +1239,10 @@ function renderRoomTracker() {
   box.querySelectorAll('[data-room]').forEach(b => b.onclick = () => startRoom(b.dataset.room));
   const u = $('#undoroom'); if (u) u.onclick = undoLast;
   const ok = $('#combatok'); if (ok) {
-    ok.onclick = () => finishCombat(+$('#hplost').value || 0);
-    $('#hplost').focus();
-    $('#hplost').onkeydown = e => { if (e.key === 'Enter') finishCombat(+$('#hplost').value || 0); };
+    const submit = () => finishCombat(+$('#hpafter').value || 0);
+    ok.onclick = submit;
+    $('#hpafter').focus(); $('#hpafter').select();
+    $('#hpafter').onkeydown = e => { if (e.key === 'Enter') submit(); };
     $('#combatcancel').onclick = () => { STATE.pending = null; renderRoomTracker(); };
   }
   const rs = $('#restsleep'); if (rs) {
