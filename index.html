@@ -1585,8 +1585,8 @@ function renderLive() {
   } else {
     box.innerHTML = `<button id="livego" class="seg" style="width:100%">⚡ Live-sync with the game (pick your StS2 save folder)</button>
       <div class="small muted" style="margin-top:3px">The tool reads the save after every room — deck, relics, HP, gold, map — automatically.
-      <br><b style="color:var(--warn)">Chrome blocks picking folders inside AppData</b> ("contains system files"). One-time fix — paste in Command Prompt (Win+R → cmd):<br>
-      <code style="user-select:all">mklink /J "%USERPROFILE%\\Documents\\StS2SaveLink" "%APPDATA%\\SlayTheSpire2"</code><br>
+      <br><b style="color:var(--warn)">Chrome blocks picking folders inside AppData</b> ("contains system files"). One-time fix — press Win+R and paste this whole line into the Run box:<br>
+      <code style="user-select:all">cmd /c mklink /J "%USERPROFILE%\\Documents\\StS2SaveLink" "%APPDATA%\\SlayTheSpire2"</code><br>
       then pick <b>Documents\\StS2SaveLink</b> here instead. (Undo anytime: <code>rmdir "%USERPROFILE%\\Documents\\StS2SaveLink"</code> — removes only the link.)</div>`;
     box.querySelector('#livego').onclick = connectLive;
   }
