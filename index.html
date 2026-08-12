@@ -612,21 +612,30 @@ const ENGINE = (() => {
     return Math.min(72, Math.round(t * 10) / 10);
   }
 
-  // P(a strictly better-quality card is offered in a remaining reward) — opportunity cost of taking now
-  function betterLaterProb(qualityBar, ctx) {
+  // P(a strictly better PICK FOR THIS DECK is offered in a remaining reward) — opportunity cost of taking now.
+  // Every remaining pool card is projected through the full scorer (tier + synergy with the
+  // current deck + deck needs + boss fit), so a B-tier card that completes your archetype
+  // counts as "better" than an off-synergy A-tier option.
+  function betterLaterProb(scoreBar, ctx) {
     const pool = charPool(ctx.char);
     const rem = remainingRewards(ctx);
     const table = effOdds(ctx);
     const RAR = ['Common', 'Uncommon', 'Rare'];
+    // project each pool card's score against the current deck (memo per call)
+    const projected = new Map();
+    for (const c of pool) {
+      const s = scoreCard(c.id, ctx);
+      projected.set(c.id, s ? s.total : 0);
+    }
     const frac = (odds) => {
       let p = 0;
       for (let i = 0; i < 3; i++) {
         const arr = pool.filter(c => c.rarity === RAR[i]);
-        if (arr.length) p += odds[i] * arr.filter(c => (c.tier ? TIER_PTS[c.tier] : 20) > qualityBar).length / arr.length;
+        if (arr.length) p += odds[i] * arr.filter(c => projected.get(c.id) > scoreBar).length / arr.length;
       }
       return p;
     };
-    let lambda = (rem.fight * 3) * frac(table.fight) + (rem.elite * 3) * frac(table.elite) + (rem.boss * 3) * frac(table.boss);
+    const lambda = (rem.fight * 3) * frac(table.fight) + (rem.elite * 3) * frac(table.elite) + (rem.boss * 3) * frac(table.boss);
     return 1 - Math.exp(-lambda);
   }
 
@@ -640,9 +649,8 @@ const ENGINE = (() => {
     const best = scored[0];
     let pBetter = null;
     if (best) {
-      // chance a strictly higher-tier card appears in a future reward → shifts the skip bar
-      const bar = (best.card.tier ? TIER_PTS[best.card.tier] : 20) + (best.up ? 4 : 0);
-      pBetter = betterLaterProb(bar, ctx);
+      // chance a future offer scores higher FOR THIS DECK (synergy included) → shifts the skip bar
+      pBetter = betterLaterProb(best.total, ctx);
       thr = Math.round((thr + (pBetter - 0.5) * 12) * 10) / 10; // plenty ahead → pickier; slim pickings → take it
     }
     let verdict = 'Nothing to score.', skipWhy = [];
@@ -655,11 +663,11 @@ const ENGINE = (() => {
         if (synPart && synPart.pts < 4) skipWhy.push('no option builds on what you’ve drafted');
         const needPart = best.parts.find(p => p.k === 'need');
         if (needPart && needPart.pts < 3) skipWhy.push('none fill a current deck gap');
-        if (pBetter != null && pBetter > 0.4) skipWhy.push(`${Math.round(pBetter * 100)}% chance a better-tier card appears in a remaining reward`);
+        if (pBetter != null && pBetter > 0.4) skipWhy.push(`${Math.round(pBetter * 100)}% chance a better pick for THIS deck (synergy included) appears in a remaining reward`);
         verdict = `Skip — best option ${best.card.name} scores ${best.total}, below your ${thr} bar. ${skipWhy.length ? skipWhy.join('; ') + '.' : 'Keep the deck lean.'}`;
       } else {
         verdict = `Take ${best.card.name} (${best.total}).`;
-        if (pBetter != null && pBetter < 0.35) verdict += ` Only a ${Math.round(pBetter * 100)}% chance anything better shows up later — don't be greedy.`;
+        if (pBetter != null && pBetter < 0.35) verdict += ` Only a ${Math.round(pBetter * 100)}% chance a better fit for this deck shows up later — don't be greedy.`;
         else if (best.total < thr + 8 && ctx.deck.length > 18) verdict += ` Close call — skipping is defensible with ${ctx.deck.length} cards.`;
       }
     }
