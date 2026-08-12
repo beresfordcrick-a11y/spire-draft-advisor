@@ -1017,8 +1017,21 @@ const STATE = {
   ascension: 0, gold: 99, hp: 80, maxHp: 80, removalsUsed: 0,
   deck: [], relics: [], slots: [null, null, null], source: 'fight', log: [],
   tab: 'draft', ancient: 'Neow', ancientSlots: [null, null, null], eventId: '',
-  shopItems: [], ench: 'Sharp', history: [], pending: null, relicLog: [],
+  shopItems: [], ench: 'Sharp', history: [], pending: null, relicLog: [], pendingTransform: null,
 };
+
+/* ---------- card transform tracking ---------- */
+function doTransform(fromId, fromUp, toId, toUp) {
+  const i = STATE.deck.findIndex(x => x.id === fromId && x.up === fromUp);
+  if (i < 0) return;
+  STATE.deck.splice(i, 1);
+  STATE.deck.push({ id: toId, up: !!toUp });
+  STATE.history.push({ act: STATE.act, room: STATE.room, type: 'transform', detail: { from: { id: fromId, up: fromUp }, to: { id: toId, up: !!toUp } } });
+  const f = ENGINE.card(fromId), t = ENGINE.card(toId);
+  flash(`Transformed ${f?.name || fromId}${fromUp ? '+' : ''} → ${t?.name || toId}${toUp ? '+' : ''}. Deck updated.`);
+  STATE.pendingTransform = null;
+  renderAll();
+}
 
 function starterDeck(ch) { return DATA.chars[ch].deck.map(id => ({ id, up: false })); }
 function starterRelics(ch) { const r = DATA.chars[ch].relic; return r ? [r] : []; }
@@ -1150,6 +1163,11 @@ function undoLast() {
         if (dd.maxHp) { STATE.maxHp -= dd.maxHp; if (dd.maxHp > 0) STATE.hp -= dd.maxHp; }
       }
     }
+  }
+  else if (h.type === 'transform' && h.detail) {
+    const j = STATE.deck.findIndex(x => x.id === h.detail.to.id && x.up === h.detail.to.up);
+    if (j >= 0) STATE.deck.splice(j, 1);
+    STATE.deck.push({ id: h.detail.from.id, up: h.detail.from.up });
   }
   else if (h.type === 'ancient') {
     if (h.detail?.healed) STATE.hp -= h.detail.healed;
@@ -1693,8 +1711,14 @@ function renderImproveTab() {
   const tr = ENGINE.transformAdvice(c);
   $('#trbox').innerHTML = (tr.candidates.length ? tr.candidates.map((e, i) =>
     `<div class="opt ${i === 0 ? 'best' : ''}"><div class="opthead"><span class="rank">${i + 1}</span><b>${esc(e.card.name)}</b>
-     <span class="pill">${esc(e.verdict)}</span></div></div>`).join('') : '<div class="muted small">No good transform targets.</div>')
-    + `<div class="small muted" style="margin-top:4px">Average quality of a random ${esc(STATE.char)} card: ${tr.poolAvg}/40 — transform anything you value below that.</div>`;
+     <span class="pill">${esc(e.verdict)}</span>
+     <button class="take" data-tr="${esc(e.card.id)}" data-trup="${e.up ? 1 : ''}">Transformed →</button></div></div>`).join('') : '<div class="muted small">No good transform targets.</div>')
+    + `<div class="small muted" style="margin-top:4px">Average quality of a random ${esc(STATE.char)} card: ${tr.poolAvg}/40 — transform anything you value below that. Tap “Transformed →” (or ⇄ on any deck card) and type what it became — the deck updates itself.</div>`;
+  $('#trbox').querySelectorAll('[data-tr]').forEach(b => b.onclick = () => {
+    STATE.pendingTransform = { id: b.dataset.tr, up: !!b.dataset.trup, upResult: false };
+    flash(`Type what ${ENGINE.card(b.dataset.tr)?.name || 'it'} turned into — picker is open on the card in your deck below.`);
+    renderAll();
+  });
   // enchant
   const esel = $('#enchsel');
   if (!esel.options.length) for (const e of DATA.enchantments) esel.appendChild(new Option(`${e.name}${e.rating ? ' (' + e.rating + ')' : ''} — ${e.effect.slice(0, 60)}`, e.id));
@@ -1733,12 +1757,33 @@ function renderDeck() {
          <b>${esc(e.c.name)}${e.up ? '<span class="up">+</span>' : ''}</b>
          ${e.n > 1 ? `<span class="pill">×${e.n}</span>` : ''}
          ${e.c.tier ? `<span class="pill" style="color:${TIER_COLORS[e.c.tier]}">${e.c.tier}</span>` : ''}
-         <span class="spacer"></span><button class="mini" title="toggle upgrade">⚒</button><button class="mini" title="remove one">−</button>`);
-      const [upB, rmB] = row.querySelectorAll('.mini');
+         <span class="spacer"></span><button class="mini" title="toggle upgrade">⚒</button><button class="mini" title="transformed into…">⇄</button><button class="mini" title="remove one">−</button>`);
+      const [upB, trB, rmB] = row.querySelectorAll('.mini');
       upB.onclick = () => { const d = STATE.deck.find(x => x.id === e.id && x.up === e.up); if (d) d.up = !d.up; renderAll(); };
+      trB.onclick = () => { STATE.pendingTransform = { id: e.id, up: e.up, upResult: false }; renderDeck(); };
       rmB.onclick = () => { const i = STATE.deck.findIndex(x => x.id === e.id && x.up === e.up); if (i >= 0) STATE.deck.splice(i, 1); renderAll(); };
       row.title = e.c.effect;
       list.appendChild(row);
+      // inline transform picker under the card being transformed
+      const pt = STATE.pendingTransform;
+      if (pt && pt.id === e.id && pt.up === e.up) {
+        const picker = el('div', 'slot', '');
+        picker.style.margin = '4px 0 6px 26px';
+        const topRow = el('div', 'rowflex small');
+        topRow.appendChild(el('span', 'muted', `⇄ ${esc(e.c.name)} became…`));
+        const upT = el('button', 'mini upg' + (pt.upResult ? ' on' : ''), '⚒ result upgraded');
+        upT.onclick = () => { pt.upResult = !pt.upResult; renderDeck(); };
+        const cancel = el('button', 'ghost small', 'cancel');
+        cancel.onclick = () => { STATE.pendingTransform = null; renderDeck(); };
+        topRow.appendChild(upT); topRow.appendChild(cancel);
+        picker.appendChild(topRow);
+        const input = el('input', 'acinput'); input.placeholder = 'type the card it turned into…';
+        const dd = el('div', 'dropdown');
+        picker.appendChild(input); picker.appendChild(dd);
+        attachAutocomplete(input, dd, () => searchableCards(true), cardRow, c => doTransform(pt.id, pt.up, c.id, pt.upResult));
+        list.appendChild(picker);
+        setTimeout(() => input.focus(), 0);
+      }
     }
   }
   const dc = STATE.deck.map(d => ENGINE.card(d.id)).filter(Boolean);
