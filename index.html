@@ -389,7 +389,12 @@ const ENGINE = (() => {
     const r = ENGINE.DATA.shop.removal, n = ctx.removalsUsed || 0;
     return ctx.ascension >= INFLATION_LEVEL ? r.inflBase + r.inflInc * n : r.base + r.inc * n;
   }
-  function potionSlots(ctx) { return ctx.ascension >= TIGHTBELT_LEVEL ? 2 : 3; }
+  const POTION_SLOT_RELICS = { PotionBelt: 2, PhialHolster: 1, AlchemicalCoffer: 4 }; // relics that raise the slot cap
+  function potionSlots(ctx) {
+    let base = ctx.ascension >= TIGHTBELT_LEVEL ? 2 : 3; // A4 Tight Belt: start with 2
+    for (const rid of (ctx.relics || [])) base += (POTION_SLOT_RELICS[rid] || 0);
+    return base;
+  }
 
   // ---------- availability: odds a synergy-partner for `tag` shows up later ----------
   // Per-slot chance a card with `tag` appears, per reward source, using
@@ -1680,10 +1685,19 @@ const ENGINE = (() => {
     if (top) smithWhy.push(`best target: ${top.card.name} (${top.why[0] || 'strong upgrade'})`);
     else { smith -= 10; smithWhy.push('no strong upgrade targets left'); }
     if (hpFrac >= 0.85) { smith += 6; smithWhy.push('HP is nearly full'); }
+    // Tiny Mailbox: resting also hands you 2 potions — a real bonus for REST, unless your slots are full (then wasted)
+    const hasMailbox = (ctx.relics || []).some(r => r === 'TinyMailbox');
+    let mailboxNote = null;
+    if (hasMailbox) {
+      const slotMax = (typeof ctx.potionSlotMax === 'number') ? ctx.potionSlotMax : potionSlots(ctx);
+      const held = ctx.potionsHeld | 0, free = Math.max(0, slotMax - held);
+      if (free >= 1) { rest += Math.min(6, free * 3); restWhy.push(`Tiny Mailbox: resting also gives 2 potions (${free} slot${free === 1 ? '' : 's'} free)`); mailboxNote = { free, wasted: 0 }; }
+      else { restWhy.push(`Tiny Mailbox's 2 potions would be WASTED — slots full (${held}/${slotMax}); smith or use a potion first`); mailboxNote = { free: 0, wasted: 2 }; }
+    }
     const choice = rest > smith ? 'rest' : 'smith';
     return {
       choice, restScore: Math.round(rest), smithScore: Math.round(smith),
-      healGain: gain, top,
+      healGain: gain, top, mailbox: mailboxNote,
       reasons: choice === 'rest' ? (restWhy.length ? restWhy : [`heal ${gain} HP (${Math.round(hpFrac * 100)}% → ${Math.round((hp + gain) / maxHp * 100)}%)`]) : smithWhy,
     };
   }
@@ -1754,6 +1768,14 @@ function addRelicOwned(id, source) {
   STATE.relics.push(id);
   STATE.relicLog.push({ id, act: STATE.act, room: STATE.room, source: source || inferRelicSource() });
   let msg = `${r ? r.name : id} added (${source || inferRelicSource()}, act ${STATE.act} room ${STATE.room}).`;
+  // potion-slot relics: expand the manual slot cap and fill the potions they grant on pickup
+  const SLOT_ADD = { PotionBelt: 2, PhialHolster: 1, AlchemicalCoffer: 4 };
+  const PICKUP_POTIONS = { PhialHolster: 2, AlchemicalCoffer: 4 }; // Alchemical Coffer fills its 4 new slots
+  if (SLOT_ADD[id] || PICKUP_POTIONS[id]) {
+    const newMax = ENGINE.potionSlots(ctx()); // relics now included
+    if (SLOT_ADD[id]) msg += ` +${SLOT_ADD[id]} potion slot${SLOT_ADD[id] === 1 ? '' : 's'} (now ${newMax}).`;
+    if (PICKUP_POTIONS[id]) { STATE.potionsHeld = Math.min(newMax, (STATE.potionsHeld | 0) + PICKUP_POTIONS[id]); msg += ` Holding ${STATE.potionsHeld} potion${STATE.potionsHeld === 1 ? '' : 's'} now.`; }
+  }
   // apply on-pickup outcomes only when the effect says so
   if (r && /upon pickup|on pickup|when obtained/i.test(r.effect)) {
     const d = ENGINE.parseOutcomeDeltas(r.effect);
@@ -1774,7 +1796,7 @@ function ctx() {
     removalsUsed: STATE.removalsUsed, relics: STATE.relics, history: STATE.history,
     lessons: STATE.lessonsData,
     potionsHeld: STATE.potionsHeld | 0,
-    potionSlotMax: STATE.maxPotionSlots || ENGINE.potionSlots({ ascension: STATE.ascension }),
+    potionSlotMax: STATE.maxPotionSlots || ENGINE.potionSlots({ ascension: STATE.ascension, relics: STATE.relics }),
   };
 }
 
@@ -1828,6 +1850,14 @@ function finishRest(mode) {
     let extra = '';
     if (STATE.relics.includes('StoneHumidifier')) { STATE.maxHp += 5; STATE.hp += 5; extra = ' +5 Max HP (Stone Humidifier).'; }
     clampHp();
+    // Tiny Mailbox: resting procures 2 potions (capped at free slots; overflow is wasted)
+    if (STATE.relics.includes('TinyMailbox')) {
+      const slotMax = ENGINE.potionSlots(ctx());
+      const free = Math.max(0, slotMax - (STATE.potionsHeld | 0));
+      const got = Math.min(2, free);
+      STATE.potionsHeld = (STATE.potionsHeld | 0) + got;
+      extra += got === 2 ? ' +2 potions (Tiny Mailbox).' : got === 1 ? ' +1 potion (Tiny Mailbox — 1 wasted, slots full).' : ' Tiny Mailbox’s 2 potions wasted — slots were full.';
+    }
     logRoom('rest', { mode });
     flash(`Rested: +${h} HP (auto${STATE.relics.includes('RegalPillow') ? ', incl. Regal Pillow +15' : ''}).${extra}`);
   } else {
