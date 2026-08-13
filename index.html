@@ -75,6 +75,10 @@ label.f{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.8p
 .verdict{padding:9px 12px;border-radius:8px;font-weight:600;margin-bottom:10px}
 .vtake{background:#173327;border:1px solid #2c6b4f;color:var(--good)}
 .vskip{background:#332217;border:1px solid #6b4f2c;color:var(--warn)}
+@keyframes pulseWarn{0%,100%{box-shadow:0 0 0 0 rgba(224,96,78,.6)}50%{box-shadow:0 0 0 7px rgba(224,96,78,0)}}
+.alertbox{background:#3a1512;border:2px solid var(--bad);color:#ffdad3;font-weight:700;font-size:14px;line-height:1.35;padding:12px 14px;border-radius:9px;margin-bottom:10px;display:flex;gap:10px;align-items:flex-start;animation:pulseWarn 1.5s ease-in-out infinite}
+.alertbox .big{font-size:22px;line-height:1;flex-shrink:0}
+.alertbox b{color:#fff}
 .opt{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:9px;background:var(--panel2)}
 .opt.best{border-color:var(--good)}
 .opthead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -1982,7 +1986,7 @@ function renderLivePred() {
     const potName = lp.potion && (DATA.potions.find(x => x.id === lp.potion.id)?.name || lp.potion.id);
     const qmark = lp.resolvedFrom === 'unknown' ? `❓→⚔ This <b>? room resolves to a ${lp.src === 'elite' ? 'ELITE' : 'FIGHT'}</b>. ` : '';
     h = `<div class="verdict vtake small">🔮 ${qmark}<b>Predicted from your run seed</b> — this ${lp.src === 'fight' ? "fight's" : lp.src === 'elite' ? "elite's" : "boss's"} card reward should be: <b>${esc(names)}</b>${potName ? `, plus a potion drop: <b>${esc(potName)}</b>` : ''}. Options are pre-filled and scored below. <span class="muted">Verify on screen — if it differs, fix the slots manually.</span></div>`;
-    if (lp.potionOverflow) h += `<div class="verdict vskip small">⚠ <b>Potion slots full (${lp.held}/${lp.slotMax})</b> and a potion is about to drop — <b>drink a potion during this fight</b> or the ${potName ? esc(potName) : 'drop'} is wasted.</div>`;
+    if (lp.potionOverflow) h += `<div class="alertbox"><span class="big">⚠️</span><div><b>POTION SLOTS FULL (${lp.held}/${lp.slotMax})</b> — a potion is about to drop. <b>Drink a potion during this fight</b> or ${potName ? esc(potName) : 'the drop'} is <b>wasted</b>.</div></div>`;
   } else if (lp.kind === 'shop') {
     const qmark = lp.resolvedFrom === 'unknown' ? `❓→🛒 This <b>? room resolves to a SHOP</b>. ` : '';
     h = `<div class="verdict vtake small">🔮 ${qmark}<b>Shop stock predicted from your run seed</b> and pre-filled below (prices approximate; potions least certain). <span class="muted">Verify against the actual shelves.</span></div>`;
@@ -2663,7 +2667,8 @@ function renderShopTab() {
   const etShop = ENGINE.eternalCards(STATE.deck);
   const slotMax = STATE.maxPotionSlots || ENGINE.potionSlots(ctx());
   const potFull = (STATE.potionsHeld | 0) >= slotMax;
-  $('#shopmeta').innerHTML = `<span class="small muted">Card removal here costs <b>${ENGINE.removalCost(ctx())}</b> gold (${STATE.removalsUsed} used${STATE.ascension >= ENGINE.INFLATION_LEVEL ? ', Inflation active' : ''}). Potions: <b${potFull ? ' style="color:var(--warn)"' : ''}>${STATE.potionsHeld | 0}/${slotMax}</b>${potFull ? ' — no free slot, potions won’t be recommended' : ''}. One colored card is 50% off — set its real price.${etShop.length ? ` <b>🔒 ${etShop.map(x => esc(x.name)).join(', ')} can't be removed (Eternal).</b>` : ''}</span>`;
+  const potMsg = potFull ? `<div class="alertbox" style="animation:none;font-size:13px;padding:9px 12px;margin:6px 0"><span class="big">⚠️</span><div><b>POTION SLOTS FULL (${STATE.potionsHeld | 0}/${slotMax})</b> — potions won’t be recommended until you free a slot.</div></div>` : '';
+  $('#shopmeta').innerHTML = potMsg + `<span class="small muted">Card removal here costs <b>${ENGINE.removalCost(ctx())}</b> gold (${STATE.removalsUsed} used${STATE.ascension >= ENGINE.INFLATION_LEVEL ? ', Inflation active' : ''}). Potions held: <b>${STATE.potionsHeld | 0}/${slotMax}</b>. One colored card is 50% off — set its real price.${etShop.length ? ` <b>🔒 ${etShop.map(x => esc(x.name)).join(', ')} can't be removed (Eternal).</b>` : ''}</span>`;
   $('#shoprec').onclick = () => {
     STATE.gold = +$('#shopgold').value || 0;
     STATE.potionsHeld = Math.max(0, +($('#shoppotions') ? $('#shoppotions').value : STATE.potionsHeld) || 0);
