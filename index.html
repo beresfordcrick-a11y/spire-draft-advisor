@@ -1584,7 +1584,19 @@ const ENGINE = (() => {
     if (!spec) return null;
     const ids = rooms[spec[0]] || [];
     if (!ids.length) return null;
-    return ids[(rooms[spec[1]] | 0) % ids.length];
+    let idx = rooms[spec[1]] | 0;
+    if (kind === 'event') {
+      // EnsureNextEventIsValid: the game skips events you've already SEEN this run (events_seen)
+      // before landing on the next one, so the raw index is often stale.
+      const seen = new Set((save.events_seen || []).map(e => slugKeyOf(String(e).split('.').pop())));
+      for (let i = 0; i < ids.length; i++) {
+        const cand = ids[idx % ids.length];
+        if (!seen.has(slugKeyOf(String(cand).split('.').pop()))) return cand;
+        idx++;
+      }
+      // all unique events exhausted → game allows repetition from the raw index
+    }
+    return ids[idx % ids.length];
   }
   // Shop is blacklisted for a '?' when the PREVIOUS room was a shop (or every child is a shop node)
   function unknownShopBlacklisted(save, mapNode) {
@@ -2040,7 +2052,7 @@ function renderLivePred() {
     if (lp.resolved === 'treasure') h = `<div class="verdict vtake small">❓→💰 This <b>? room resolves to a TREASURE chest</b> — free gold and a relic.</div>`;
     else if (lp.resolved === 'event') {
       const ev = lp.eventId && DATA.events.find(e => e.id === lp.eventId);
-      h = `<div class="verdict vtake small">❓→✨ This <b>? room resolves to an EVENT</b>${ev ? ` — next in your act's queue: <b>${esc(ev.name)}</b> (pre-selected in the Event tab)` : ' — check the Event tab'}. <span class="muted">Verify on screen.</span></div>`;
+      h = `<div class="verdict vtake small">❓→✨ This <b>? room resolves to an EVENT</b>${ev ? ` — most likely <b>${esc(ev.name)}</b> (next unseen in your act's queue, pre-selected in the Event tab)` : ' — check the Event tab'}. <span class="muted">Verify on screen — a few events are condition-gated and can be skipped.</span></div>`;
     }
   } else if (lp.kind === 'neow') {
     const names = lp.options.map(o => { const r = DATA.relics.find(x => x.id === o.id); return (r ? r.name : o.id) + (o.pool === 'curse' ? ' (cursed trade)' : ''); }).join(', ');
