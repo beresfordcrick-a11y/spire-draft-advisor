@@ -188,7 +188,7 @@ footer{padding:10px 20px 26px;color:var(--muted);font-size:11.5px;max-width:1500
       </div>
       <div id="tab-shop" style="display:none">
         <h2>Shop — what's for sale?</h2>
-        <div class="rowflex small" style="margin-bottom:8px">Your gold: <input type="number" id="shopgold" class="num" style="width:80px"></div>
+        <div class="rowflex small" style="margin-bottom:8px">Your gold: <input type="number" id="shopgold" class="num" style="width:80px"> · Potions held: <input type="number" id="shoppotions" class="num" style="width:52px" min="0"></div>
         <div id="shopmeta" style="margin-bottom:8px"></div>
         <div id="shopitems"></div>
         <button id="shoprec" style="width:100%;background:#28324a;border-color:var(--accent2);font-weight:600;padding:9px;margin-top:8px">What should I buy?</button>
@@ -996,6 +996,10 @@ const ENGINE = (() => {
         const p = ENGINE.DATA.potions.find(x => x.id === it.id); if (!p) continue; obj = p;
         value = (RATE_PTS[p.tier] ?? 5) * 0.9;
         label = p.name; why = p.tier ? [`${p.tier}-tier potion`] : [];
+        // don't recommend a potion you have no room to hold
+        const slotMax = (typeof ctx.potionSlotMax === 'number') ? ctx.potionSlotMax : potionSlots(ctx);
+        const held = ctx.potionsHeld | 0;
+        if (slotMax > 0 && held >= slotMax) { value *= 0.05; why = [`⚠ no free potion slot (${held}/${slotMax}) — you'd have to use one first`]; }
       }
       const vpg = it.price > 0 ? value / it.price * 100 : value;
       entries.push({ kind: it.kind, id: it.id, obj, label, price: it.price, value: Math.round(value * 10) / 10, vpg: Math.round(vpg * 10) / 10, why });
@@ -1418,8 +1422,9 @@ const ENGINE = (() => {
       const rr = rollRarity(rewards, 'shop', pity, false, scarcity); // pity read, not advanced
       const got = pickByRarity(pool, rr.rarity, inv, shops, e => e.t === t);
       rewards.nextFloat(); // wasted upgrade roll
-      let cost = Math.round((CARD_BASE[got.rarity] || 50) * shops.nextFloat(0.95, 1.05));
-      if (i === saleSlot) cost = Math.trunc(cost / 2);
+      const base = CARD_BASE[got.rarity] || 50;
+      let cost = Math.round(base * shops.nextFloat(0.95, 1.05)); // CalcCost() in Populate()
+      if (i === saleSlot) cost = Math.trunc(Math.round(base * shops.nextFloat(0.95, 1.05)) / 2); // SetOnSale() calls CalcCost() a 2nd time, then halves
       if (got.pick) inv.add(got.pick.id);
       cards.push({ id: got.pick ? got.pick.id : null, rarity: got.rarity, type: t, cost, sale: i === saleSlot });
     });
@@ -1451,7 +1456,7 @@ const ENGINE = (() => {
       if (p) { removed.add(p.id); picks.push(p); }
     }
     const potions = picks.map(p => ({ id: p.id, rarity: p.rarity, cost: Math.round((POT_BASE[p.rarity] || 50) * shops.nextFloat(0.95, 1.05)) }));
-    return { cards, colorless: colorlessOut, relics, potions, saleSlot, char };
+    return { cards, colorless: colorlessOut, relics, potions, saleSlot, char, shopsCounter: shops.counter, rewardsCounter: rewards.counter };
   }
   // ---------- v10: '?' room resolution (UnknownMapPointOdds.Roll, run 'unknown_map_point' stream) ----------
   function predictUnknownRoom(save, opts) {
@@ -1615,6 +1620,8 @@ function ctx() {
     ascension: STATE.ascension, gold: STATE.gold, hp: STATE.hp, maxHp: STATE.maxHp,
     removalsUsed: STATE.removalsUsed, relics: STATE.relics, history: STATE.history,
     lessons: STATE.lessonsData,
+    potionsHeld: STATE.potionsHeld | 0,
+    potionSlotMax: STATE.maxPotionSlots || ENGINE.potionSlots({ ascension: STATE.ascension }),
   };
 }
 
@@ -1842,6 +1849,10 @@ function applyLiveSave(p, rawSave) {
 function applyLivePredictions(p, rawSave) {
   STATE.livePrediction = null;
   if (!rawSave) return;
+  // sync potion count + slots from the save so shop/reward advice knows if you have room
+  const pl0 = (rawSave.players || [])[0] || {};
+  if (Array.isArray(pl0.potions)) STATE.potionsHeld = pl0.potions.length;
+  if (pl0.max_potion_slot_count) STATE.maxPotionSlots = pl0.max_potion_slot_count | 0;
   let node = liveNodeType(p);
   const caveats = ENGINE.predictionCaveats(p.relics);
   let resolvedFrom = null, unknownEventId = null;
@@ -2560,6 +2571,8 @@ function estPrice(kind, obj) {
 }
 function renderShopTab() {
   $('#shopgold').value = STATE.gold;
+  const potInp = $('#shoppotions');
+  if (potInp) { potInp.value = STATE.potionsHeld | 0; potInp.onchange = e => { STATE.potionsHeld = Math.max(0, +e.target.value || 0); }; }
   const list = $('#shopitems'); list.innerHTML = '';
   STATE.shopItems.forEach((it, i) => {
     const row = el('div', 'shoprow',
@@ -2587,9 +2600,12 @@ function renderShopTab() {
     o => { STATE.shopItems.push({ kind: kindSel.value, id: o.id, name: o.name, price: estPrice(kindSel.value, o) }); input.value = ''; renderShopTab(); });
   list.appendChild(addRow);
   const etShop = ENGINE.eternalCards(STATE.deck);
-  $('#shopmeta').innerHTML = `<span class="small muted">Card removal here costs <b>${ENGINE.removalCost(ctx())}</b> gold (${STATE.removalsUsed} used${STATE.ascension >= ENGINE.INFLATION_LEVEL ? ', Inflation active' : ''}). Potion slots: ${ENGINE.potionSlots(ctx())}. One colored card is 50% off — set its real price.${etShop.length ? ` <b>🔒 ${etShop.map(x => esc(x.name)).join(', ')} can't be removed (Eternal).</b>` : ''}</span>`;
+  const slotMax = STATE.maxPotionSlots || ENGINE.potionSlots(ctx());
+  const potFull = (STATE.potionsHeld | 0) >= slotMax;
+  $('#shopmeta').innerHTML = `<span class="small muted">Card removal here costs <b>${ENGINE.removalCost(ctx())}</b> gold (${STATE.removalsUsed} used${STATE.ascension >= ENGINE.INFLATION_LEVEL ? ', Inflation active' : ''}). Potions: <b${potFull ? ' style="color:var(--warn)"' : ''}>${STATE.potionsHeld | 0}/${slotMax}</b>${potFull ? ' — no free slot, potions won’t be recommended' : ''}. One colored card is 50% off — set its real price.${etShop.length ? ` <b>🔒 ${etShop.map(x => esc(x.name)).join(', ')} can't be removed (Eternal).</b>` : ''}</span>`;
   $('#shoprec').onclick = () => {
     STATE.gold = +$('#shopgold').value || 0;
+    STATE.potionsHeld = Math.max(0, +($('#shoppotions') ? $('#shoppotions').value : STATE.potionsHeld) || 0);
     const sa = ENGINE.shopAdvice(STATE.shopItems, ctx());
     let h = '';
     if (sa.plan.length) {
@@ -2611,6 +2627,7 @@ function renderShopTab() {
       let msg = `Bought ${e.label} for ${e.price}g (gold auto-updated: ${STATE.gold} left).`;
       if (e.kind === 'card') { STATE.deck.push({ id: e.id, up: false }); msg += ' Added to deck.'; }
       else if (e.kind === 'relic') { addRelicOwned(e.id, 'shop'); msg += ' Added to relics.'; }
+      else if (e.kind === 'potion') { STATE.potionsHeld = (STATE.potionsHeld | 0) + 1; msg += ` Now holding ${STATE.potionsHeld} potion${STATE.potionsHeld === 1 ? '' : 's'}.`; }
       else if (e.kind === 'removal') {
         STATE.removalsUsed++;
         const target = ENGINE.removalAdvice(ctx(), 1)[0];
